@@ -44,12 +44,12 @@ def load_model(bank_path, config, eval_batches, freeze=True):
   """Load banked model."""
   banked_meta = torch.load(bank_path, map_location=device)
   meta = banked_meta['meta']
-  role, size, seed = meta['role'], meta['size'], meta['seed']
+  role, n_embed, seed = meta['role'], meta['n_embed'], meta['seed']
 
   model = GPT(
       vocab_size=config['vocab_size'],
       block_size=config['block_size'],
-      n_embed=size,
+      n_embed=n_embed,
       n_heads=config['n_heads'],
       n_layers=config['n_layers'],
       dropout=config['dropout']
