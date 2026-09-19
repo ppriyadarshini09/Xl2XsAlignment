@@ -43,6 +43,15 @@ def get_batch(data, block_size, batch_size):
     return x.to(device), y.to(device)
 
 
+@torch.no_grad()
+def compute_scale(model, site, ref_batches):
+    total, count = 0.0, 0
+    for x, _ in ref_batches:
+        v = model.forward_repr_at_site(site, x) # [B, T, n_embed]
+        total += v.pow(2).sum().item()          # scalar
+        count += v.numel()                      # scalar = B * T * n_embed
+    return (total / count) ** 0.5     # RMS
+
 ## ---------------- Train GPT ----------------
 def train_standalone(train_data, eval_batches, config, n_embed, run_dir, run_name):
     os.makedirs(run_dir, exist_ok=True)
