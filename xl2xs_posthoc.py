@@ -13,14 +13,14 @@ def _fixed_perm(n, device, seed=4242):
     return torch.randperm(n, generator=g).to(device)
 
 @torch.no_grad()
-def _geom_one_batch(xs_model, xl_model, site, head, x, y):
+def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
   """All alignment geometry for a single eval batch."""
   V = xs_model.lm_head.out_features
   D = xs_model.n_embed
   NAN = float('nan')
-
-  xs = xs_model.forward_repr_at_site(site, x)
-  xl = xl_model.forward_repr_at_site(site, x)
+  
+  xs = xs_model.forward_repr_at_site(site, x) / xs_scale
+  xl = xl_model.forward_repr_at_site(site, x) / xl_scale
   xl2xs = head(xl)
 
   def ce(repr_):
@@ -81,9 +81,9 @@ def _geom_one_batch(xs_model, xl_model, site, head, x, y):
 
 
 @torch.no_grad()
-def get_alignment_geometry(xs_model, xl_model, site, head, eval_batches):
+def get_alignment_geometry(xs_model, xl_model, site, xs_scale, xl_scale, head, eval_batches):
   xs_model.eval(); xl_model.eval(); head.eval()
-  per_batch = [_geom_one_batch(xs_model, xl_model, site, head, x, y)
+  per_batch = [_geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y)
                for x, y in eval_batches]
   n = len(per_batch)
   return {k: float(sum(d[k] for d in per_batch) / n) for k in per_batch[0]}
@@ -123,10 +123,10 @@ def build_align_head(xs_n_embed, xl_n_embed, arch='linear_ln'):
   return align_head.to(device)
 
 
-def fit_posthoc_align_head(xs_model, xl_model, site, train_data, eval_batches,
-                           run_name, align_head_dir, config,
-                           objective='cosine', arch='linear_ln', alpha=1.0,
-                           max_steps=3000, snap_every=200,
+def fit_posthoc_align_head(xs_model, xl_model, site, xs_scale, xl_scale, 
+                           train_data, eval_batches, run_name, align_head_dir, 
+                           config, objective='cosine', arch='linear_ln', 
+                           alpha=1.0, max_steps=3000, snap_every=200,
                            snap_early_until=400, snap_early_every=10, lr=1e-3):
   final_ckpt_path = os.path.join(align_head_dir, "final.pt")
   best_ckpt_path = os.path.join(align_head_dir, "best.pt")
@@ -171,8 +171,8 @@ def fit_posthoc_align_head(xs_model, xl_model, site, train_data, eval_batches,
     x, y = get_batch(train_data, config['block_size'], config['batch_size'])
 
     with torch.no_grad():
-      xs = xs_model.forward_repr_at_site(site, x)
-      xl = xl_model.forward_repr_at_site(site, x)
+      xs = xs_model.forward_repr_at_site(site, x) / xs_scale
+      xl = xl_model.forward_repr_at_site(site, x) / xl_scale
 
     if arch == 'bidirectional_head':
       xl2xs = align_head.down(xl) # down
@@ -193,11 +193,11 @@ def fit_posthoc_align_head(xs_model, xl_model, site, train_data, eval_batches,
     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
     is_snap = (step % snap_every == 0) or \
-     (step <= snap_early_until and step % snap_early_every == 0)
+          (snap_early_every > 0 and step <= snap_early_until and step % snap_early_every == 0)
     if is_snap:
       align_head.eval()
-      align_geom = get_alignment_geometry(xs_model, xl_model, site,
-                                          align_head, eval_batches)
+      align_geom = get_alignment_geometry(xs_model, xl_model, site, xs_scale,
+                                           xl_scale, align_head, eval_batches)
       align_head.train()
       str_msg = f"step {step} | train: {loss.item():.4f}, eval: {align_geom['align_loss']:.4f}"
       if best_loss > align_geom['align_loss']:
