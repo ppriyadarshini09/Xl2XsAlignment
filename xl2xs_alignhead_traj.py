@@ -63,7 +63,7 @@ def load_model(bank_path, config, eval_batches, freeze=True):
 
   loss_again = eval_loss(model, eval_batches)
   assert abs(loss_again - meta['eval_loss'] < 1e-4), (
-      f"{role}_{size}_s{seed} load mismatch: banked loss {meta['eval_loss']:.6f}"
+      f"{role}_{n_embed}_s{seed} load mismatch: banked loss {meta['eval_loss']:.6f}"
       f" vs recalculated loss {loss_again:.6f} - model was mis-configured while"
       f" loading (check initialization, dropouts etc)"
   )
