@@ -118,11 +118,11 @@ def align_head_trajetory_seed_sweep(traj_seeds, traj_config, model_bank_dir,
     set_seed(traj_config['probe_seed'])
     _, xs_probe_loss = train_standalone_probe(
         xs_model, site, xs_scale, train_data, eval_batches, train_config,
-        run_name=traj_run, probe_dir=align_head_probe_dir, max_steps=traj_config['probe_steps'])
+        probe_dir=align_head_probe_dir, run_name=traj_run, max_steps=traj_config['probe_steps'])
     set_seed(traj_config['probe_seed'])
     _, xl_probe_loss = train_standalone_probe(
         xl_model, site, xl_scale, train_data, eval_batches, train_config,
-        run_name=traj_run, probe_dir=align_head_probe_dir, max_steps=traj_config['probe_steps'])
+        probe_dir=align_head_probe_dir, run_name=traj_run, max_steps=traj_config['probe_steps'])
     gap = xs_probe_loss - xl_probe_loss
     print(f"\nXS {xs_probe_loss:.4f} | XL {xl_probe_loss:.4f} | gap {gap:.4f} nats\n")
     assert gap > 0, "XL does not beat XS -- retention is undefined for this pair"
