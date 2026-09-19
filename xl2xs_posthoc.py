@@ -18,9 +18,17 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
   V = xs_model.lm_head.out_features
   D = xs_model.n_embed
   NAN = float('nan')
-  
-  xs = xs_model.forward_repr_at_site(site, x) / xs_scale
-  xl = xl_model.forward_repr_at_site(site, x) / xl_scale
+
+  xs = xs_model.forward_repr_at_site(site, x)
+  xs_norm_bs = xs.norm(dim=-1).mean().item()
+  xs = xs / xs_scale
+  xs_norm_as = xs.norm(dim=-1).mean().item()
+
+  xl = xl_model.forward_repr_at_site(site, x)
+  xl_norm_bs = xl.norm(dim=-1).mean().item()
+  xl = xl/ xl_scale
+  xl_norm_as = xl.norm(dim=-1).mean().item()
+
   xl2xs = head(xl)
 
   def ce(repr_):
@@ -65,8 +73,10 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
     'shuffled_sim'     : shuffled_sim,
     'sim_above_shuffle': matched_sim - shuffled_sim,
     'sim_above_floor'  : matched_sim - math.sqrt(2.0 / (math.pi * D)),
-    'xs_norm'          : xs_norm,
-    'xl_norm'          : xl_f.norm(dim=-1).mean().item(),
+    'xs_norm_bs'       : xs_norm_bs,
+    'xs_norm_as'       : xs_norm_as,
+    'xl_norm_bs'       : xl_norm_bs,
+    'xl_norm_as'       : xl_norm_as,
     'xl2xs_norm'       : xl2xs_norm,
     'norm_ratio'       : xl2xs_norm / xs_norm if xs_norm else NAN,
     'xl2xs_mse'        : F.mse_loss(xl2xs_f, xs_f).item(),
