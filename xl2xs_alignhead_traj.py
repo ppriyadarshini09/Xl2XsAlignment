@@ -7,15 +7,6 @@ from train_gpt import device, compute_scale, eval_loss
 from xl2xs_posthoc import fit_posthoc_align_head, build_align_head
 from train_probes import train_xl2xs_probe, train_standalone_probe
 
-SEEDS = [0, 1, 2]
-PROBE_SEED = 1234
-TRAJ_XS, TRAJ_XL = 64, 512
-PROBE_STEPS = 2500
-ALIGN_STEPS = 2000
-SNAP_EVERY = 200
-SNAP_EVERY_EARLY  = 20
-SNAP_EARLY_UNTIL  = 400
-TRAJ_SEEDS = [0] # instead of [0, 1, 2]
 
 # --------------- Utils ----------------
 def get_batch(data, block_size, batch_size):
