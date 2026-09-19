@@ -70,7 +70,7 @@ def load_model(bank_path, config, eval_batches, freeze=True):
   return model, meta
 
 # ---------------- Run Alignhead Trajectory Sweep ----------------
-def align_head_trajetory_seed_sweep(traj_seeds, traj_config, 
+def align_head_trajetory_seed_sweep(traj_seeds, traj_config, model_bank_dir,
                                     base_align_head_dir, train_data, eval_batches,
                                     train_config,
                                     objective='mse', arch='bidirectional_head',
@@ -104,9 +104,13 @@ def align_head_trajetory_seed_sweep(traj_seeds, traj_config,
       print(f"Trajectory run for {traj_run} (obj:{objective}, arch:{arch})" \
             f" was not started or partially done. Starting again...")
 
-    xs_model, _ = load_model("xs", traj_xs, traj_seed, train_config, eval_batches)
+    # Load XS model, compute XS scale
+    xs_bank_path = os.path.join(model_bank_dir, f"xs_{traj_xs}_s{traj_seed}.pt")
+    xs_model, _ = load_model(xs_bank_path, train_config, eval_batches)
     xs_scale = compute_scale(xs_model, site, eval_batches) if scaled else 1.0
-    xl_model, _ = load_model("xl", traj_xl, traj_seed, train_config, eval_batches)
+    # Load XL model, compute XL scale
+    xl_bank_path = os.path.join(model_bank_dir, f"xl_{traj_xl}_s{traj_seed}.pt")
+    xl_model, _ = load_model(xl_bank_path, train_config, eval_batches)
     xl_scale = compute_scale(xl_model, site, eval_batches) if scaled else 1.0
 
     align_head_probe_dir = os.path.join(align_head_dir, "probes")
