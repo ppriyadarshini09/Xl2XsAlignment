@@ -40,10 +40,11 @@ def set_seed(s):
     torch.cuda.manual_seed_all(s)
 
 # ---------------- Load Model ----------------
-def load_model(role, size, seed, config, eval_batches, freeze=True):
+def load_model(bank_path, config, eval_batches, freeze=True):
   """Load banked model."""
-  banked_meta = torch.load(bank_path(role, size, seed), map_location=device)
+  banked_meta = torch.load(bank_path, map_location=device)
   meta = banked_meta['meta']
+  role, size, seed = meta['role'], meta['size'], meta['seed']
 
   model = GPT(
       vocab_size=config['vocab_size'],
