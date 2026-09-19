@@ -2,7 +2,8 @@ import os
 import torch
 import numpy as np
 import gc, random
-from train_gpt import device, compute_scale, train_standalone_probe
+from model import GPT
+from train_gpt import device, compute_scale, eval_loss
 from xl2xs_posthoc import fit_posthoc_align_head
 from train_probes import train_xl2xs_probe, train_standalone_probe
 
@@ -15,6 +16,26 @@ SNAP_EVERY = 200
 SNAP_EVERY_EARLY  = 20
 SNAP_EARLY_UNTIL  = 400
 TRAJ_SEEDS = [0] # instead of [0, 1, 2]
+
+# --------------- Utils ----------------
+def bank_path(bank_dir, role, size, seed):
+  return os.path.join(bank_dir, f"{role}_{size}_s{seed}.pt")
+
+def get_batch(data, block_size, batch_size):
+    ix = torch.randint(0, (len(data) - block_size), (batch_size,))  # [B]
+    x = torch.stack([data[i : i + block_size] for i in ix])  # [B, T]
+    y = torch.stack([data[i + 1 : i + block_size + 1] for i in ix])  # [B, T]
+    return x.to(device), y.to(device)
+
+def make_eval_batches(data, config, n_batches=10, eval_seed=999):
+    state = torch.get_rng_state()
+    torch.manual_seed(eval_seed)
+    batches = [
+        get_batch(data, config["block_size"], config["batch_size"])
+        for _ in range(n_batches)
+    ]
+    torch.set_rng_state(state)
+    return batches
 
 def free(*objs):
   for o in objs:
@@ -30,6 +51,36 @@ def set_seed(s):
   if torch.cuda.is_available():
     torch.cuda.manual_seed_all(s)
 
+# ---------------- Load Model ----------------
+def load_model(role, size, seed, config, eval_batches, freeze=True):
+  """Load banked model."""
+  banked_meta = torch.load(bank_path(role, size, seed), map_location=device)
+  meta = banked_meta['meta']
+
+  model = GPT(
+      vocab_size=config['vocab_size'],
+      block_size=config['block_size'],
+      n_embed=size,
+      n_heads=config['n_heads'],
+      n_layers=config['n_layers'],
+      dropout=config['dropout']
+  ).to(device)
+  model.load_state_dict(banked_meta['model'])
+  model.eval()
+
+  if freeze:
+    for p in model.parameters():
+      p.requires_grad_(False)
+
+  loss_again = eval_loss(model, eval_batches)
+  assert abs(loss_again - meta['eval_loss'] < 1e-4), (
+      f"{role}_{size}_s{seed} load mismatch: banked loss {meta['eval_loss']:.6f}"
+      f" vs recalculated loss {loss_again:.6f} - model was mis-configured while"
+      f" loading (check initialization, dropouts etc)"
+  )
+  return model, meta
+
+# ---------------- Run Alignhead Trajectory Sweep ----------------
 def align_head_trajetory_seed_sweep(base_align_head_dir, objective, arch,
                                     site='final_pre_lnf', scaled=False, 
                                     alpha=1.0, lr=1e-3):
