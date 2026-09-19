@@ -114,7 +114,7 @@ def align_head_trajetory_seed_sweep(traj_seeds, traj_config, model_bank_dir,
     xl_model, _ = load_model(xl_bank_path, train_config, eval_batches)
     xl_scale = compute_scale(xl_model, site, eval_batches) if scaled else 1.0
 
-    align_head_probe_dir = os.path.join(align_head_dir, "probes")
+    align_head_probe_dir = os.path.join(align_head_run_dir, "probes")
     os.makedirs(align_head_probe_dir, exist_ok=True)
     set_seed(traj_config['probe_seed'])
     _, xs_probe_loss = train_standalone_probe(
