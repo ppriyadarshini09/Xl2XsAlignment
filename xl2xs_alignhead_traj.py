@@ -1,6 +1,7 @@
 import os
 import torch
 import numpy as np
+import pandas as pd
 import gc, random
 from train_gpt import device, compute_scale, eval_loss, GPT
 from xl2xs_posthoc import fit_posthoc_align_head, build_align_head
