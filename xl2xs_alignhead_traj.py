@@ -2,8 +2,7 @@ import os
 import torch
 import numpy as np
 import gc, random
-from model import GPT
-from train_gpt import device, compute_scale, eval_loss
+from train_gpt import device, compute_scale, eval_loss, GPT
 from xl2xs_posthoc import fit_posthoc_align_head, build_align_head
 from train_probes import train_xl2xs_probe, train_standalone_probe
 
