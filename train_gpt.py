@@ -3,28 +3,105 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from model import GPT
+from model import GPTEmbedding, Block
 
-device = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "mps" if torch.backends.mps.is_available() else "cpu"
-)
-print(f"using device: {device}")
+# ---------------- GPT -------------------
+# @title Standalone GPT
+class GPT(nn.Module):
+    """
+    Full GPT language model.
+
+    Takes: ids of range [B, T] - token ids of batch size B and sequence length T
+    Returns: logits [B, T, vocab_size] and optionally loss (perhaps scoring all token in vocab as next token)
+    """
+
+    def __init__(self, vocab_size, block_size, n_embed, n_heads, n_layers, dropout=0.0):
+        super().__init__()
+        self.block_size = block_size
+        self.n_embed = n_embed
+
+        self.transformer = nn.ModuleDict({
+            'embedding' : GPTEmbedding(vocab_size, block_size, n_embed, dropout),
+            'blocks'    : nn.Sequential(*[
+                Block(n_embed, n_heads, block_size, dropout)
+                for _ in range(n_layers)
+            ]),
+            'ln_f'      : nn.LayerNorm(n_embed)
+        })
+
+        # Output head - projects vector [n_embed] -> score [vocab_size]
+        self.lm_head = nn.Linear(n_embed, vocab_size, bias=False)
+
+        # Weights tying - share embedding and lm_head weights
+        self.transformer['embedding'].token_embed.embedding.weight = \
+            self.lm_head.weight
+
+        # Intitalize weights (recursively  called for all sduless/sub-modules);
+        self.apply(self._init_weights)
+
+        print(f"Standalone GPT initialized - {self.count_params()/1e6:.2f}M parameters")
+
+    def _init_weights(self, module):
+        """
+        Initialize weights following GPT-2 paper.
+        Linear and Embeddings layers: normal distribution std:0.02
+        Bias: zero initialized
+        """
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    def count_params(self):
+        return sum(p.numel() for p in self.parameters())
+
+    def forward_repr_post_lnf(self, idx):
+      x = self.forward_repr_pre_lnf(idx)     # [B, T, n_embed]
+      return self.transformer['ln_f'](x)
+
+    def forward_repr_pre_lnf(self, idx):
+      x = self.transformer['embedding'](idx)
+      return self.transformer['blocks'](x)
+
+    def forward_repr_at_site(self, site, idx):
+      if site == 'final_post_lnf':
+        return self.forward_repr_post_lnf(idx)
+      if site == 'final_pre_lnf':
+        return self.forward_repr_pre_lnf(idx)
+      if site.startswith('block'):
+        i = int(site[5:])
+        x = self.transformer['embedding'](idx)
+        x = self.transformer['blocks'][:i](x)
+        return x
+      raise ValueError(site)
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        assert T <= self.block_size, \
+            f"Sequence length {T} exceeds block_size {self.block_size}"
+
+        x = self.forward_repr_post_lnf(idx)    # [B, T, n_embed]
+
+        logits = self.lm_head(x) # [B, T, vocab_size]
+
+        # Compute loss if targets provided
+        loss = None
+        if targets is not None:
+            B, T, V = logits.shape
+            # CrossEntropyLoss expects [B*T, V] and [B, T]
+            loss = F.cross_entropy(
+                logits.view(B * T, V),
+                targets.view(B * T)
+            )
+        return logits, loss
 
 
 ## ---------------- Utils ----------------
-def make_eval_batches(data, config, n_batches=10, eval_seed=999):
-    state = torch.get_rng_state()
-    torch.manual_seed(eval_seed)
-    batches = [
-        get_batch(data, config["block_size"], config["batch_size"])
-        for _ in range(n_batches)
-    ]
-    torch.set_rng_state(state)
-    return batches
-
-
 @torch.no_grad()
 def eval_loss(model, batches=None):
     assert batches is not None, "batches to compute eval loss can not be None"
@@ -34,13 +111,6 @@ def eval_loss(model, batches=None):
     if was_training:
         model.train()
     return float(np.mean(losses))
-
-
-def get_batch(data, block_size, batch_size):
-    ix = torch.randint(0, (len(data) - block_size), (batch_size,))  # [B]
-    x = torch.stack([data[i : i + block_size] for i in ix])  # [B, T]
-    y = torch.stack([data[i + 1 : i + block_size + 1] for i in ix])  # [B, T]
-    return x.to(device), y.to(device)
 
 
 @torch.no_grad()
