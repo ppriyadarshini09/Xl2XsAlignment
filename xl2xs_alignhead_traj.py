@@ -4,7 +4,7 @@ import numpy as np
 import gc, random
 from model import GPT
 from train_gpt import device, compute_scale, eval_loss
-from xl2xs_posthoc import fit_posthoc_align_head
+from xl2xs_posthoc import fit_posthoc_align_head, build_align_head
 from train_probes import train_xl2xs_probe, train_standalone_probe
 
 SEEDS = [0, 1, 2]
@@ -18,9 +18,6 @@ SNAP_EARLY_UNTIL  = 400
 TRAJ_SEEDS = [0] # instead of [0, 1, 2]
 
 # --------------- Utils ----------------
-def bank_path(bank_dir, role, size, seed):
-  return os.path.join(bank_dir, f"{role}_{size}_s{seed}.pt")
-
 def get_batch(data, block_size, batch_size):
     ix = torch.randint(0, (len(data) - block_size), (batch_size,))  # [B]
     x = torch.stack([data[i : i + block_size] for i in ix])  # [B, T]
@@ -81,14 +78,20 @@ def load_model(role, size, seed, config, eval_batches, freeze=True):
   return model, meta
 
 # ---------------- Run Alignhead Trajectory Sweep ----------------
-def align_head_trajetory_seed_sweep(base_align_head_dir, objective, arch,
+def align_head_trajetory_seed_sweep(traj_seeds, traj_config, 
+                                    base_align_head_dir, train_data, eval_batches,
+                                    train_config,
+                                    objective='mse', arch='bidirectional_head',
                                     site='final_pre_lnf', scaled=False, 
-                                    alpha=1.0, lr=1e-3):
-  for traj_seed in TRAJ_SEEDS:
-    traj_run = f"traj_xl{TRAJ_XL}_xs{TRAJ_XS}_s{traj_seed}"
+                                    alpha=1.0):
+  for traj_seed in traj_seeds:
+    traj_xs = traj_config['traj_xs']
+    traj_xl = traj_config['traj_xl']
+    traj_run = f"traj_xl{traj_xl}_xs{traj_xs}_s{traj_seed}"
     align_head_dir = os.path.join(base_align_head_dir, traj_run, site)
     os.makedirs(align_head_dir, exist_ok=True)
     align_head_run_dir = os.path.join(align_head_dir, f"{objective}_{arch}")
+
     if arch == 'bidirectional_head':
       alpha_name = f"{alpha:g}".replace('.', 'p').replace('-', 'm')
       align_head_run_dir = os.path.join(align_head_run_dir, f"alpha_{alpha_name}")
@@ -109,40 +112,40 @@ def align_head_trajetory_seed_sweep(base_align_head_dir, objective, arch,
       print(f"Trajectory run for {traj_run} (obj:{objective}, arch:{arch})" \
             f" was not started or partially done. Starting again...")
 
-    xs_model, _ = load_model("xs", TRAJ_XS, traj_seed, train_config, EVAL_BATCHES)
-    xs_scale = compute_scale(xs_model, site, EVAL_BATCHES) if scaled else 1.0
-    xl_model, _ = load_model("xl", TRAJ_XL, traj_seed, train_config, EVAL_BATCHES)
-    xl_scale = compute_scale(xl_model, site, EVAL_BATCHES) if scaled else 1.0
+    xs_model, _ = load_model("xs", traj_xs, traj_seed, train_config, eval_batches)
+    xs_scale = compute_scale(xs_model, site, eval_batches) if scaled else 1.0
+    xl_model, _ = load_model("xl", traj_xl, traj_seed, train_config, eval_batches)
+    xl_scale = compute_scale(xl_model, site, eval_batches) if scaled else 1.0
 
     align_head_probe_dir = os.path.join(align_head_dir, "probes")
     os.makedirs(align_head_probe_dir, exist_ok=True)
-    set_seed(PROBE_SEED)
+    set_seed(traj_config['probe_seed'])
     _, xs_probe_loss = train_standalone_probe(
-        xs_model, site, xs_scale, train_data, EVAL_BATCHES, train_config,
-        run_name=traj_run, probe_dir=align_head_probe_dir, max_steps=PROBE_STEPS)
-    set_seed(PROBE_SEED)
+        xs_model, site, xs_scale, train_data, eval_batches, train_config,
+        run_name=traj_run, probe_dir=align_head_probe_dir, max_steps=traj_config['probe_steps'])
+    set_seed(traj_config['probe_seed'])
     _, xl_probe_loss = train_standalone_probe(
-        xl_model, site, xl_scale, train_data, EVAL_BATCHES, train_config,
-        run_name=traj_run, probe_dir=align_head_probe_dir, max_steps=PROBE_STEPS)
+        xl_model, site, xl_scale, train_data, eval_batches, train_config,
+        run_name=traj_run, probe_dir=align_head_probe_dir, max_steps=traj_config['probe_steps'])
     gap = xs_probe_loss - xl_probe_loss
     print(f"\nXS {xs_probe_loss:.4f} | XL {xl_probe_loss:.4f} | gap {gap:.4f} nats\n")
     assert gap > 0, "XL does not beat XS -- retention is undefined for this pair"
 
-    set_seed(PROBE_SEED)
+    set_seed(traj_config['probe_seed'])
     _ = fit_posthoc_align_head(
         xs_model=xs_model, xl_model=xl_model, site=site,
         xs_scale=xs_scale, xl_scale=xl_scale,
-        train_data=train_data, eval_batches=EVAL_BATCHES,
+        train_data=train_data, eval_batches=eval_batches,
         run_name=traj_run, align_head_dir=align_head_run_dir,
         config=train_config,
         objective=objective,
         arch=arch,
-        max_steps=ALIGN_STEPS,
-        snap_every=SNAP_EVERY,
-        snap_early_until=SNAP_EARLY_UNTIL,
-        snap_early_every=SNAP_EVERY_EARLY,
+        max_steps=traj_config['align_steps'],
+        snap_every=traj_config['snap_every'],
+        snap_early_until=traj_config['snap_early_until'],
+        snap_early_every=traj_config['snap_early_every'],
         alpha=alpha,
-        lr=lr)
+        lr=traj_config['lr'])
 
     # ---- walk the snapshots, probe each one ----
     rows = []
@@ -151,14 +154,14 @@ def align_head_trajetory_seed_sweep(base_align_head_dir, objective, arch,
     for fn in sorted(os.listdir(traj_dir)):
         snap = torch.load(os.path.join(traj_dir, fn), map_location=device)
 
-        head = build_align_head(TRAJ_XS, TRAJ_XL, arch=snap['arch'])
+        head = build_align_head(traj_xs, traj_xl, arch=snap['arch'])
         head.load_state_dict(snap['head'])
         head.eval()
 
-        set_seed(PROBE_SEED)
+        set_seed(traj_config['probe_seed'])
         _, probe_loss = train_xl2xs_probe(
             xs_model, xl_model, site, xs_scale, xl_scale, head, train_data, 
-            EVAL_BATCHES, train_config, steps=PROBE_STEPS, 
+            eval_batches, train_config, steps=traj_config['probe_steps'], 
             traj_probe_dir=traj_probe_dir, traj_step_pt=fn)
 
         g = snap['align_geom']
@@ -178,6 +181,8 @@ def align_head_trajetory_seed_sweep(base_align_head_dir, objective, arch,
     traj_df['seed'] = traj_seed
     traj_df['objective'] = objective
     traj_df['arch'] = arch
+    traj_df['scaled'] = scaled
+    traj_df['alpha'] = alpha
     traj_df.to_csv(traj_stats_csv, index=False)
 
     # ---- the test ----
