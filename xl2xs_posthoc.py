@@ -20,14 +20,10 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
   NAN = float('nan')
 
   xs = xs_model.forward_repr_at_site(site, x)
-  xs_norm_bs = xs.norm(dim=-1).mean().item()
   xs = xs / xs_scale
-  xs_norm_as = xs.norm(dim=-1).mean().item()
 
   xl = xl_model.forward_repr_at_site(site, x)
-  xl_norm_bs = xl.norm(dim=-1).mean().item()
   xl = xl/ xl_scale
-  xl_norm_as = xl.norm(dim=-1).mean().item()
 
   xl2xs = head(xl)
 
@@ -48,6 +44,7 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
       xl2xs_f - xl2xs_f.mean(0, keepdim=True), dim=-1).mean().item()
 
   xs_norm = xs_f.norm(dim=-1).mean().item()
+  xl_norm = xl_f.norm(dim=-1).mean().item()
   xl2xs_norm = xl2xs_f.norm(dim=-1).mean().item()
 
   # bidirectional-only terms; NaN elsewhere so averaging still works
@@ -73,10 +70,10 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
     'shuffled_sim'     : shuffled_sim,
     'sim_above_shuffle': matched_sim - shuffled_sim,
     'sim_above_floor'  : matched_sim - math.sqrt(2.0 / (math.pi * D)),
-    'xs_norm_bs'       : xs_norm_bs,
-    'xs_norm_as'       : xs_norm_as,
-    'xl_norm_bs'       : xl_norm_bs,
-    'xl_norm_as'       : xl_norm_as,
+    'xs_scale'         : xs_scale,
+    'xl_scale'         : xl_scale,
+    'xs_norm'          : xs_norm,     
+    'xl_norm'          : xl_norm,
     'xl2xs_norm'       : xl2xs_norm,
     'norm_ratio'       : xl2xs_norm / xs_norm if xs_norm else NAN,
     'xl2xs_mse'        : F.mse_loss(xl2xs_f, xs_f).item(),
