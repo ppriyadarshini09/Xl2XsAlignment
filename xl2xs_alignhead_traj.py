@@ -83,7 +83,7 @@ def align_head_trajetory_seed_sweep(traj_seeds, traj_config, model_bank_dir,
     align_head_dir = os.path.join(base_align_head_dir, traj_run, site)
     os.makedirs(align_head_dir, exist_ok=True)
     align_head_run = f"{objective}_{arch}_scaled" if scaled else f"{objective}_{arch}_unscaled"
-    align_head_run_dir = os.path.join(align_head_dir, f"{objective}_{arch}")
+    align_head_run_dir = os.path.join(align_head_dir, align_head_run)
 
     if arch == 'bidirectional_head':
       alpha_name = f"{alpha:g}".replace('.', 'p').replace('-', 'm')
