@@ -5,6 +5,13 @@ import torch.nn.functional as F
 import numpy as np
 from model import GPTEmbedding, Block
 
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available() else "cpu"
+)
+print(f"[train_gpt.py] using device: {device}")
+
 # ---------------- GPT -------------------
 # @title Standalone GPT
 class GPT(nn.Module):
@@ -121,6 +128,13 @@ def compute_scale(model, site, ref_batches):
         total += v.pow(2).sum().item()          # scalar
         count += v.numel()                      # scalar = B * T * n_embed
     return (total / count) ** 0.5     # RMS
+
+
+def get_batch(data, block_size, batch_size):
+    ix = torch.randint(0, (len(data) - block_size), (batch_size,))  # [B]
+    x = torch.stack([data[i : i + block_size] for i in ix])  # [B, T]
+    y = torch.stack([data[i + 1 : i + block_size + 1] for i in ix])  # [B, T]
+    return x.to(device), y.to(device)
 
 ## ---------------- Train GPT ----------------
 def train_standalone(train_data, eval_batches, config, n_embed, run_dir, run_name):
