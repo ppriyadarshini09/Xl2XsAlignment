@@ -110,6 +110,21 @@ class GPT(nn.Module):
 
 ## ---------------- Utils ----------------
 @torch.no_grad()
+def finish_forward(model, site, h):
+    """Continue model's forward pass from `site`, given residual h [B,T,D]."""
+    if site == 'final_post_lnf':
+        x = h
+    elif site == 'final_pre_lnf':
+        x = model.transformer['ln_f'](h)
+    elif site.startswith('block'):
+        i = int(site[5:])                                  # 'block2' = entering block 2
+        x = model.transformer['blocks'][i:](h)
+        x = model.transformer['ln_f'](x)
+    else:
+        raise ValueError(site)
+    return model.lm_head(x)
+
+@torch.no_grad()
 def eval_loss(model, batches=None):
     assert batches is not None, "batches to compute eval loss can not be None"
     was_training = model.training
