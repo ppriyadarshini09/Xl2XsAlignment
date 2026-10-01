@@ -27,10 +27,9 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
 
   xl2xs = head(xl)
 
-  def ce(repr_):
-    logits = xs_model.lm_head(repr_) if repr_.shape[-1] == D else xl_model.lm_head(repr_)
-    B, T, _ = logits.shape
-    return F.cross_entropy(logits.view(B*T, V), y.view(B*T)).item()
+def ce_logits(logits):
+    B, T, Vd = logits.shape
+    return F.cross_entropy(logits.view(B*T, Vd), y.view(B*T)).item()
 
   flat = lambda t: t.reshape(-1, t.shape[-1])
   xs_f, xl_f, xl2xs_f = flat(xs), flat(xl), flat(xl2xs)
@@ -58,9 +57,9 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
     xl_var = (xl - xl.mean(dim=(0, 1), keepdim=True)).pow(2).mean().item()
     xl_cycle_fvu = xl_identity_mse / xl_var if xl_var else NAN
 
-  xs_loss = xl_loss = xl2xs_loss = NAN
-  if site == 'final_post_lnf':
-    xs_loss, xl_loss, xl2xs_loss = ce(xs), ce(xl), ce(xl2xs)
+  xs_loss    = ce_logits(finish_forward(xs_model, site, xs    * xs_scale))
+  xl_loss    = ce_logits(finish_forward(xl_model, site, xl    * xl_scale))
+  xl2xs_loss = ce_logits(finish_forward(xs_model, site, xl2xs * xs_scale))
 
   return {
     'align_loss'       : 1 - matched_sim,
