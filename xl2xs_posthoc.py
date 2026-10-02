@@ -5,7 +5,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from train_gpt import get_batch, device 
+from train_gpt import get_batch, device, finish_forward
 
 
 def _fixed_perm(n, device, seed=4242):
