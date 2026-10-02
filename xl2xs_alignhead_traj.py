@@ -1,11 +1,12 @@
 import os
+import shutil
 import torch
 import numpy as np
 import pandas as pd
 import gc, random
-from train_gpt import device, compute_scale, eval_loss, GPT
-from xl2xs_posthoc import fit_posthoc_align_head, build_align_head
-from train_probes import train_xl2xs_probe, train_standalone_probe
+from train_gpt import device, compute_scale, eval_loss, GPT, finish_forward
+from xl2xs_posthoc import fit_posthoc_align_head, build_align_head, get_alignment_geometry
+from train_probes import train_xl2xs_probe, train_standalone_probe, probe_ce
 
 
 # --------------- Utils ----------------
@@ -199,3 +200,124 @@ def align_head_trajetory_seed_sweep(traj_seeds, traj_config, model_bank_dir,
         print("\n-> No clear within-fit relationship. The width sweep is doing the "
               "work, and the dimension confound is not ruled out.\n")
     free(xl_model); free(xs_model)
+
+
+def recompute_traj_metrics(traj_seeds, traj_config, model_bank_dir,
+                           base_align_head_dir, eval_batches, train_config,
+                           objective='mse', arch='bidirectional_head',
+                           site='final_pre_lnf', scaled=False, alpha=1.0,
+                           write_csv=True):
+  V = train_config['vocab_size']
+  for traj_seed in traj_seeds:
+    traj_xs = traj_config['traj_xs']
+    traj_xl = traj_config['traj_xl']
+    traj_run = f"traj_xl{traj_xl}_xs{traj_xs}_s{traj_seed}"
+    align_head_dir = os.path.join(base_align_head_dir, traj_run, site)
+    align_head_run = f"{objective}_{arch}_scaled" if scaled else f"{objective}_{arch}_unscaled"
+    align_head_run_dir = os.path.join(align_head_dir, align_head_run)
+
+    if arch == 'bidirectional_head':
+      alpha_name = f"{alpha:g}".replace('.', 'p').replace('-', 'm')
+      align_head_run_dir = os.path.join(align_head_run_dir, f"alpha_{alpha_name}")
+
+    print(f"\n Loading from {align_head_run_dir} for recomputation...")
+    traj_dir = os.path.join(align_head_run_dir, "traj")
+    align_head_probe_dir = os.path.join(align_head_run_dir, "probes")
+
+    xs_rep = lambda x: xs_model.forward_repr_at_site(site, x) / xs_scale
+    xl_rep = lambda x: xl_model.forward_repr_at_site(site, x) / xl_scale
+
+    # Load XS model and probe, compute XS scale
+    xs_bank_path = os.path.join(model_bank_dir, f"xs_{traj_xs}_s{traj_seed}.pt")
+    xs_model, _ = load_model(xs_bank_path, train_config, eval_batches)
+    xs_scale = compute_scale(xs_model, site, eval_batches) if scaled else 1.0
+
+    xs_probe_ckpt = torch.load(
+        os.path.join(align_head_probe_dir, f"probe_{traj_xs}.pt"),
+        map_location=device)
+    xs_probe = nn.Linear(traj_xs, V, bias=False).to(device)
+    xs_probe.load_state_dict(xs_probe_ckpt['probe'])
+    xs_chk = xs_probe_ckpt['best_loss']
+
+    # Load XL model and probe, compute XL scale
+    xl_bank_path = os.path.join(model_bank_dir, f"xl_{traj_xl}_s{traj_seed}.pt")
+    xl_model, _ = load_model(xl_bank_path, train_config, eval_batches)
+    xl_scale = compute_scale(xl_model, site, eval_batches) if scaled else 1.0
+
+    xl_probe_ckpt = torch.load(
+        os.path.join(align_head_probe_dir, f"probe_{traj_xl}.pt"),
+        map_location=device)
+    xl_probe = nn.Linear(traj_xl, V, bias=False).to(device)
+    xl_probe.load_state_dict(xl_probe_ckpt['probe'])
+    xl_chk = xl_probe_ckpt['best_loss']
+
+    # Sanity: the cached probes must match THIS scaling convention.
+    # (Training evals were monotone, so best_loss == loss of the saved weights.)
+    xs_probe_loss = probe_ce(xs_probe, xs_rep, eval_batches)
+    xl_probe_loss = probe_ce(xl_probe, xl_rep, eval_batches)
+    probe_tol = 1e-3
+    if abs(xs_chk - xs_probe_loss) > probe_tol or abs(xl_chk - xl_probe_loss) > probe_tol:
+        raise RuntimeError(
+            f"cached probes don't match this site/scaling: "
+            f"xs {xs_chk:.4f} vs {xs_probe_loss:.4f}, xl {xl_chk:.4f} vs {xl_probe_loss:.4f}. "
+            f"Wrong probe_dir or scaled flag?")
+
+    gap = xs_probe_loss - xl_probe_loss
+    print(f"\nXS {xs_probe_loss:.4f} | XL {xl_probe_loss:.4f} | gap {gap:.4f} nats\n")
+    assert gap > 0, "XL does not beat XS -- retention is undefined for this pair"
+
+    traj_probe_dir = os.path.join(align_head_run_dir, "traj_probes")
+    assert os.path.exists(traj_probe_dir), \
+      f"Traj probe directory not found @ {traj_probe_dir}"
+
+    traj_dir = os.path.join(align_head_run_dir, "traj")
+    rows = []
+    for fn in sorted(os.listdir(traj_probe_dir)):
+
+      # get xl2xs traj probe, to compute retrained funtional transfer metric
+      probe_snap = torch.load(os.path.join(traj_probe_dir, fn), map_location=device)
+      xl2xs_probe = nn.Linear(traj_xs, V, bias=False).to(device)
+      xl2xs_probe.load_state_dict(probe_snap['probe'])
+
+      align_head_traj = os.path.join(traj_dir, fn)
+      assert os.path.exists(align_head_traj), \
+        f"align head snapshot doesn't exist @ {align_head_traj}"
+
+      # get xl2xs align head, to compute frozen functional transfer & geometric
+      # alignment metric.
+      traj_snap = torch.load(os.path.join(traj_dir, fn), map_location=device)
+
+      bridge = build_align_head(traj_xs, traj_xl, arch=arch)
+      bridge.load_state_dict(traj_snap['head'])
+      bridge.eval()
+      bridged = lambda x: bridge(xl_rep(x))
+      xl2xs_probe_loss = probe_ce(xl2xs_probe, bridged, eval_batches)
+      xl2xs_via_xs_probe_loss = probe_ce(xs_probe, bridged, eval_batches)
+      align_geom = get_alignment_geometry(xs_model, xl_model, site, xs_scale,
+                                           xl_scale, bridge, eval_batches)
+      rows.append({'step': traj_snap['step'], **align_geom,
+                   'xl_probe_loss': xl_probe_loss,
+                   'xs_probe_loss': xs_probe_loss,
+                   'gap_nats': gap,
+                   'xl2xs_probe_loss': xl2xs_probe_loss,
+                   'retained': (xs_probe_loss - xl2xs_probe_loss) / gap,
+                   'retained_frozen': (xs_probe_loss - xl2xs_via_xs_probe_loss) / gap,
+                   })
+      print(f"  step {traj_snap['step']:5d} | sim {align_geom['sim_above_shuffle']:.4f} | "
+              f"retained {rows[-1]['retained']:6.1%} | frozen {rows[-1]['retained_frozen']:7.1%} | "
+              f"stitched {rows[-1]['stitched_retained']:7.1%}")
+      del bridge
+      
+    df = pd.DataFrame(rows)
+    df['seed'], df['objective'], df['arch'] = traj_seed, objective, arch
+    df['site'], df['scaled'], df['alpha'] = site, scaled, alpha
+    df['xs_scale'], df['xl_scale'] = xs_scale, xl_scale
+ 
+    if write_csv:
+        csv_path = os.path.join(align_head_run_dir, 'trajectory.csv')
+        backup = os.path.join(align_head_run_dir, 'trajectory_orig.csv')
+        if os.path.exists(csv_path) and not os.path.exists(backup):
+            shutil.copy(csv_path, backup)          # keep the first original only
+        df.to_csv(csv_path, index=False)
+        print(f"wrote {csv_path}" + (f" (original kept at {backup})"
+                                     if os.path.exists(backup) else ""))
