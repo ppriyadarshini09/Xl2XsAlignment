@@ -1,6 +1,7 @@
 import os
 import shutil
 import torch
+import torch.nn as nn
 import numpy as np
 import pandas as pd
 import gc, random
@@ -70,13 +71,12 @@ def load_model(bank_path, config, eval_batches, freeze=True):
   )
   return model, meta
 
-def recompute_traj_metrics(traj_seeds, traj_config, model_bank_dir,
+def recompute_traj_metrics(traj_seed, traj_config, model_bank_dir,
                            base_align_head_dir, eval_batches, train_config,
                            objective='mse', arch='bidirectional_head',
                            site='final_pre_lnf', scaled=False, alpha=1.0,
                            write_csv=True):
-  V = train_config['vocab_size']
-  for traj_seed in traj_seeds:
+    V = train_config['vocab_size']
     traj_xs = traj_config['traj_xs']
     traj_xl = traj_config['traj_xl']
     traj_run = f"traj_xl{traj_xl}_xs{traj_xs}_s{traj_seed}"
@@ -189,6 +189,7 @@ def recompute_traj_metrics(traj_seeds, traj_config, model_bank_dir,
         df.to_csv(csv_path, index=False)
         print(f"wrote {csv_path}" + (f" (original kept at {backup})"
                                      if os.path.exists(backup) else ""))
+    return df
 
 # ---------------- Run Alignhead Trajectory Sweep ----------------
 def align_head_trajetory_seed_sweep(traj_seeds, traj_config, model_bank_dir,
@@ -285,10 +286,8 @@ def align_head_trajetory_seed_sweep(traj_seeds, traj_config, model_bank_dir,
     
     # ---------------- metrics phase (load-only, same code as recompute) ----------------
     traj_df = recompute_trajectory_metrics(
-        arm_dir=run_dir, probe_dir=probe_dir, traj_seed=traj_seed,
-        traj_config=traj_config, model_bank_dir=model_bank_dir,
-        eval_batches=eval_batches, train_config=train_config,
-        site=site, scaled=scaled, objective=objective, arch=arch, alpha=alpha)
+        traj_seed, traj_config, model_bank_dir, base_align_head_dir,
+        eval_batches, train_config, site, scaled, objective, arch, alpha)
 
     fit = traj_df[traj_df.step > 0]
     pk = traj_df.loc[traj_df.retained.idxmax()]
