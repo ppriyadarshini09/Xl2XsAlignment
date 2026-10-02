@@ -5,11 +5,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from train_gpt import get_batch, device
 
+def probe_ce(probe, repr_fn, eval_batches):
+    losses = []
+    for x, y in eval_batches:
+        logits = probe(repr_fn(x))
+        B, T, V = logits.shape
+        losses.append(F.cross_entropy(logits.view(B * T, V), y.view(B * T)).item())
+    return sum(losses) / len(losses)
 
 def train_standalone_probe(
     model,
     site,
-    rs_scale,
+    scale,
     train_data,
     eval_batches,
     config,
@@ -43,21 +50,19 @@ def train_standalone_probe(
     optim = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=weight_decay)
     best_loss = float("inf")
 
+    repr_fn = lambda x: model.forward_repr_at_site(site, x) / scale
+
     @torch.no_grad()
     def eval_probe():
-        losses = []
         probe.eval()
-        for x, y in eval_batches:
-            logits = probe(model.forward_repr_at_site(site, x) / rs_scale)
-            B, T, _ = logits.shape
-            losses.append(F.cross_entropy(logits.view(B * T, V), y.view(B * T)).item())
+        ce_loss = probe_ce(probe, repr_fn, eval_batches)
         probe.train()
-        return float(np.mean(losses))
+        return ce_loss
 
     for step in range(max_steps + 1):
         x, y = get_batch(train_data, config["block_size"], config["batch_size"])
         with torch.no_grad():
-            repr_ = model.forward_repr_at_site(site, x) / rs_scale
+            repr_ = repr_fn(x)
         logits = probe(repr_)
         B, T, _ = logits.shape
         loss = F.cross_entropy(logits.view(B * T, V), y.view(B * T))
