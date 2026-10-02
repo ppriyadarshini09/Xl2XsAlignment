@@ -60,7 +60,7 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
   xs_loss    = ce_logits(finish_forward(xs_model, site, xs    * xs_scale))
   xl_loss    = ce_logits(finish_forward(xl_model, site, xl    * xl_scale))
   xl2xs_loss = ce_logits(finish_forward(xs_model, site, xl2xs * xs_scale))
-  stitched_retained = (xs_loss − xl2xs_loss) / (xs_loss − xl_loss)
+  stitched_retained = (xs_loss - xl2xs_loss) / (xs_loss - xl_loss)
 
   return {
     'align_loss'       : 1 - matched_sim,
