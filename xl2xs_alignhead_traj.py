@@ -71,11 +71,11 @@ def load_model(bank_path, config, eval_batches, freeze=True):
   )
   return model, meta
 
-def recompute_traj_metrics(traj_seed, traj_config, model_bank_dir,
-                           base_align_head_dir, eval_batches, train_config,
-                           objective='mse', arch='bidirectional_head',
-                           site='final_pre_lnf', scaled=False, alpha=1.0,
-                           write_csv=True):
+def recompute_trajectory_metrics(traj_seed, traj_config, model_bank_dir,
+                                 base_align_head_dir, eval_batches, train_config,
+                                 objective='mse', arch='bidirectional_head',
+                                 site='final_pre_lnf', scaled=False, alpha=1.0,
+                                 write_csv=True):
     V = train_config['vocab_size']
     traj_xs = traj_config['traj_xs']
     traj_xl = traj_config['traj_xl']
