@@ -119,8 +119,8 @@ def recompute_trajectory_metrics(traj_seed, traj_config, model_bank_dir,
     xl_probe.load_state_dict(xl_probe_ckpt['probe'])
     xl_chk = xl_probe_ckpt['best_loss']
 
-   # Test variance and RMS
-   for name, m in [('XS', xs_model), ('XL', xl_model)]:
+    # Test variance and RMS
+    for name, m in [('XS', xs_model), ('XL', xl_model)]:
         v = torch.cat([m.forward_repr_at_site(site, x).reshape(-1, m.n_embed) for x, _ in eval_batches])
         print(name, 'rms', v.pow(2).mean().sqrt().item(), 'var', v.var(0, unbiased=False).mean().item())
 
