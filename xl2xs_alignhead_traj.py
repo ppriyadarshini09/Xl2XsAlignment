@@ -111,13 +111,18 @@ def recompute_trajectory_metrics(traj_seed, traj_config, model_bank_dir,
     xl_bank_path = os.path.join(model_bank_dir, f"xl_{traj_xl}_s{traj_seed}.pt")
     xl_model, _ = load_model(xl_bank_path, train_config, eval_batches)
     xl_scale = compute_scale(xl_model, site, eval_batches) if scaled else 1.0
-
+                                     
     xl_probe_ckpt = torch.load(
         os.path.join(align_head_probe_dir, f"probe_{traj_xl}.pt"),
         map_location=device)
     xl_probe = nn.Linear(traj_xl, V, bias=False).to(device)
     xl_probe.load_state_dict(xl_probe_ckpt['probe'])
     xl_chk = xl_probe_ckpt['best_loss']
+
+   # Test variance and RMS
+   for name, m in [('XS', xs_model), ('XL', xl_model)]:
+        v = torch.cat([m.forward_repr_at_site(site, x).reshape(-1, m.n_embed) for x, _ in eval_batches])
+        print(name, 'rms', v.pow(2).mean().sqrt().item(), 'var', v.var(0, unbiased=False).mean().item())
 
     # Sanity: the cached probes must match THIS scaling convention.
     # (Training evals were monotone, so best_loss == loss of the saved weights.)
