@@ -30,9 +30,9 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
   flat = lambda t: t.reshape(-1, t.shape[-1])
   xs_f, xl_f, xl2xs_f = flat(xs), flat(xl), flat(xl2xs)
 
-  xs_var = xs_f.reshape(-1, xs_acts.shape[-1]).var(0).mean().item()
-  xl_var = xl_f.reshape(-1, xl_acts.shape[-1]).var(0).mean().item()
-  xl2xs_var = xl2xs_f.reshape(-1, xl_acts.shape[-1]).var(0).mean().item()
+  xs_var = xs_f.var(0, unbiased=False).mean().item()
+  xl_var = xl_f.var(0, unbiased=False).mean().item()
+  xl2xs_var = xl2xs_f.var(0, unbiased=False).mean().item()
 
   matched = F.cosine_similarity(xs_f, xl2xs_f, dim=-1)
   matched_sim = matched.mean().item()
@@ -54,7 +54,6 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
     xs2xl_mse = F.mse_loss(xs2xl, xl).item()
     xl_identity_mse = F.mse_loss(xl_recon, xl).item()
     xs_identity_mse = F.mse_loss(head.down(xs2xl), xs).item()
-    xl_var = (xl - xl.mean(dim=(0, 1), keepdim=True)).pow(2).mean().item()
     xl_cycle_fvu = xl_identity_mse / xl_var if xl_var else NAN
 
   def ce_logits(logits):
