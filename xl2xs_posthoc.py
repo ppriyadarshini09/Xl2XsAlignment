@@ -30,6 +30,10 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
   flat = lambda t: t.reshape(-1, t.shape[-1])
   xs_f, xl_f, xl2xs_f = flat(xs), flat(xl), flat(xl2xs)
 
+  xs_var = xs_f.reshape(-1, xs_acts.shape[-1]).var(0).mean().item()
+  xl_var = xl_f.reshape(-1, xl_acts.shape[-1]).var(0).mean().item()
+  xl2xs_var = xl2xs_f.reshape(-1, xl_acts.shape[-1]).var(0).mean().item()
+
   matched = F.cosine_similarity(xs_f, xl2xs_f, dim=-1)
   matched_sim = matched.mean().item()
   perm = _fixed_perm(xs_f.shape[0], xs_f.device)
@@ -75,6 +79,9 @@ def _geom_one_batch(xs_model, xs_scale, xl_model, xl_scale, site, head, x, y):
     'xs_norm'          : xs_norm,     
     'xl_norm'          : xl_norm,
     'xl2xs_norm'       : xl2xs_norm,
+    'xl_var'           : xl_var,
+    'xs_var'           : xs_var,
+    'xl2xs_var'        : xl2xs_var,
     'norm_ratio'       : xl2xs_norm / xs_norm if xs_norm else NAN,
     'xl2xs_mse'        : F.mse_loss(xl2xs_f, xs_f).item(),
     'xs2xl_mse'        : xs2xl_mse,
