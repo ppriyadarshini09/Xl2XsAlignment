@@ -1,4 +1,6 @@
 # @title Eval plot libraries
+import math
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -35,18 +37,160 @@ PAPER_STYLE = {
 PALETTE = ['#4C72B0', '#DD8452', '#55A868', '#C44E52', '#8172B3', '#937860']
 
 
-def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=True):
-    """paths: {label: path_to_trajectory_csv}"""
+# ---------------------------------------------------------------------------
+# Summary tables
+# ---------------------------------------------------------------------------
+# Each table is described by a spec: an ordered list of
+#   (group, label, key, fmt, better[, step_key])
+# group    : top-level header (columns with the same group are merged)
+# label    : sub-header shown under the group
+# key      : key in the per-run summary dict
+# fmt      : format string for the cell
+# better   : 'high' / 'low' -> shaded green where favourable; None -> no shading
+# step_key : optional; appends " @ <step>" to the cell (shading still uses `key`)
+PCT, FLT, INT, SCI = '{:.1%}', '{:.3f}', '{:d}', '{:.2e}'
+
+FUNCTIONAL_SPEC = [
+    ('Retrained', 'peak @ step', 'r_peak', PCT, 'high', 'r_peak_step'),
+    ('Retrained', 'end',         'r_end',  PCT, 'high'),
+    ('Retrained', 'drop',        'r_drop', PCT, 'low'),
+    ('Frozen',    'peak @ step', 'f_peak', PCT, 'high', 'f_peak_step'),
+    ('Frozen',    'end',         'f_end',  PCT, 'high'),
+    ('Frozen',    'drop',        'f_drop', PCT, 'low'),
+    ('Stitched',  'peak @ step', 's_peak', PCT, 'high', 's_peak_step'),
+    ('Stitched',  'end',         's_end',  PCT, 'high'),
+    ('Stitched',  'drop',        's_drop', PCT, 'low'),
+]
+
+GEOMETRIC_SPEC = [
+    ('Sim > shuffle', '@ retrained peak', 'sim',          PCT, 'high', 'r_peak_step'),
+    ('Sim > shuffle', 'end',              'sim_end',      PCT, 'high'),
+    ('Centered sim',  '@ retrained peak', 'centered',     PCT, 'high', 'r_peak_step'),
+    ('Centered sim',  'end',              'centered_end', PCT, 'high'),
+]
+
+BIDIRECTIONAL_SPEC = [
+    ('At convergence', 'XL cycle FVU', 'xl_cycle_fvu', FLT, 'low'),
+    ('At convergence', 'XS→XL FVU',    'xs2xl_fvu',    FLT, 'low'),
+    ('At convergence', 'XL var',       'xl_var',       SCI, None),
+    ('At convergence', 'XS var',       'xs_var',       SCI, None),
+    ('At convergence', 'retained',     'retained',     PCT, 'high'),
+]
+
+
+def _isnan(v):
+    return v is None or (isinstance(v, float) and math.isnan(v))
+
+
+def _cell(v, fmt, step=None):
+    """Format one cell; NaN -> em dash, optional ' @ step' suffix."""
+    if _isnan(v):
+        return '—'
+    s = fmt.format(int(v)) if fmt == INT else fmt.format(v)
+    if step is not None and not _isnan(step):
+        s += f' @ {int(step)}'
+    return s
+
+
+def summary_table(rows, spec, caption=None, cmap='Greens', strength=0.45):
+    """Turn a list of per-run dicts into a shaded pandas Styler.
+
+    Cells are pre-formatted strings (so values like "71.0% @ 1100" are possible);
+    shading and bolding are driven by the underlying numeric value via `gmap`.
+    Favourable cells get a darker green, the best per column is bolded, and
+    columns with better=None stay plain.
+    """
+    raw = pd.DataFrame(rows).set_index('name')
+    raw.index.name = None
+    cols = pd.MultiIndex.from_tuples([(s[0], s[1]) for s in spec])
+
+    num = pd.DataFrame(index=raw.index, columns=cols, dtype=float)
+    disp = pd.DataFrame(index=raw.index, columns=cols, dtype=object)
+    for s, col in zip(spec, cols):
+        key, fmt = s[2], s[3]
+        step_key = s[5] if len(s) > 5 else None
+        vals = pd.to_numeric(raw[key], errors='coerce') if key in raw else \
+            pd.Series(float('nan'), index=raw.index)
+        steps = raw[step_key] if step_key in raw else None
+        num[col] = vals
+        disp[col] = [_cell(v, fmt, None if steps is None else steps.iloc[i])
+                     for i, v in enumerate(vals)]
+
+    sty = disp.style
+    for s, col in zip(spec, cols):
+        better = s[4]
+        v = num[col]
+        if better is None or v.notna().sum() < 2 or v.max() == v.min():
+            continue
+        # cap the darkest shade so text stays readable
+        sty = sty.background_gradient(
+            cmap=cmap if better == 'high' else f'{cmap}_r',
+            subset=[col], gmap=v,
+            low=0 if better == 'high' else strength,
+            high=strength if better == 'high' else 0,
+        )
+        best = v.max() if better == 'high' else v.min()
+        sty = sty.apply(lambda _c, v=v, best=best:
+                        ['font-weight:700' if x == best else '' for x in v],
+                        subset=[col])
+
+    sty = sty.set_table_styles([
+        {'selector': '',
+         'props': 'border-collapse:collapse; font-family:DejaVu Sans,Helvetica,Arial,sans-serif;'
+                  'font-size:12px; font-variant-numeric:tabular-nums;'},
+        {'selector': 'caption',
+         'props': 'caption-side:top; text-align:left; font-weight:600; padding:0 0 6px 0;'},
+        {'selector': 'th',
+         'props': 'padding:4px 8px; text-align:center; font-weight:600; color:#333;'},
+        {'selector': 'th.col_heading.level0',
+         'props': 'border-bottom:1px solid #999;'},
+        {'selector': 'th.col_heading.level1',
+         'props': 'border-bottom:1.5px solid #333; font-weight:500; white-space:nowrap;'},
+        {'selector': 'th.row_heading',
+         'props': 'text-align:left; white-space:nowrap; padding-right:14px;'},
+        {'selector': 'td',
+         'props': 'padding:4px 8px; text-align:right; white-space:nowrap;'},
+        {'selector': 'tbody tr',
+         'props': 'border-bottom:1px solid #eee;'},
+    ])
+    if caption:
+        sty = sty.set_caption(caption)
+    return sty
+
+
+def _show(sty):
+    """Display a Styler in a notebook; fall back to plain text elsewhere."""
+    try:
+        from IPython.display import display
+        display(sty)
+    except ImportError:
+        print(sty.data.to_string())
+
+
+def _load(path):
+    return (pd.read_csv(path)
+              .drop_duplicates(subset='step', keep='last')
+              .sort_values('step'))
+
+
+def _empty_row(name, spec):
+    return {'name': name, **{s[2]: float('nan') for s in spec}}  # steps -> NaN via reindex
+
+
+# ---------------------------------------------------------------------------
+# Plots
+# ---------------------------------------------------------------------------
+def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=True,
+                                  show_table=True):
+    """paths: {label: path_to_trajectory_csv}. Returns the summary DataFrame."""
+    rows = []
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 3, figsize=figsize)
         ax = ax.ravel()
-        summary = []
         mk = dict(marker='o', ms=2.5) if markers else {}
 
         for i, (name, path) in enumerate(paths.items()):
-            d = (pd.read_csv(path)
-                   .drop_duplicates(subset='step', keep='last')
-                   .sort_values('step'))
+            d = _load(path)
             c = PALETTE[i % len(PALETTE)]
 
             fit = d[d.step > 0]
@@ -54,61 +198,36 @@ def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=
             ax[1].plot(fit.step, fit.frozen_retained * 100, color=c, label=name, **mk)
             ax[2].plot(fit.step, fit.stitched_retained * 100, color=c, label=name, **mk)
 
-            # --- SAFETY CHECKS ---
-            if d.retained.isna().all() or d.frozen_retained.isna().all():
-                print(f"Skipping peak plotting for {name}: column contains only NaN")
-                # Append to summary with NaNs or dummy values to prevent unpacking errors later
-                summary.append((name, float('nan'), float('nan'), -1, float('nan'),
-                                float('nan'), float('nan'), float('nan'), -1,
-                                float('nan'), float('nan'), float('nan')))
-                continue # Skip to next trajectory
+            needed = ['retained', 'frozen_retained', 'stitched_retained']
+            if any(d[col].isna().all() for col in needed):
+                print(f"Skipping peaks for {name}: a retained column is all NaN")
+                rows.append(_empty_row(name, FUNCTIONAL_SPEC))
+                continue
 
-            retrained_pk = d.loc[d.retained.idxmax()]
-            retrained_end = d.retained.iloc[-1]
-            frozen_pk = d.loc[d.frozen_retained.idxmax()]
-            frozen_end = d.frozen_retained.iloc[-1]
-            stitched_pk = d.loc[d.stitched_retained.idxmax()]
-            stitched_end = d.stitched_retained.iloc[-1]
-            ax[0].plot(retrained_pk.step, retrained_pk.retained * 100, marker='o', ms=6, mfc='none',
+            r_pk = d.loc[d.retained.idxmax()]
+            f_pk = d.loc[d.frozen_retained.idxmax()]
+            s_pk = d.loc[d.stitched_retained.idxmax()]
+            last = d.iloc[-1]
+
+            ax[0].plot(r_pk.step, r_pk.retained * 100, marker='o', ms=6, mfc='none',
                        mec=c, mew=1.4, ls='none', zorder=5)
-            ax[1].plot(frozen_pk.step, frozen_pk.frozen_retained * 100, marker='o', ms=6, mfc='none',
+            ax[1].plot(f_pk.step, f_pk.frozen_retained * 100, marker='o', ms=6, mfc='none',
                        mec=c, mew=1.4, ls='none', zorder=5)
-            ax[2].plot(frozen_pk.step, frozen_pk.stitched_retained * 100, marker='o', ms=6, mfc='none',
+            ax[2].plot(f_pk.step, f_pk.stitched_retained * 100, marker='o', ms=6, mfc='none',
                        mec=c, mew=1.4, ls='none', zorder=5)
 
-            summary.append((name,
-                            retrained_pk.gap_nats,
-                            retrained_pk.retained,
-                            int(retrained_pk.step),
-                            retrained_end,
-                            retrained_pk.retained - retrained_end,
-                            retrained_pk.sim_above_shuffle,
-                            d.sim_above_shuffle.iloc[-1],
-                            d.xs_var.iloc[-1],
-                            d.xl_var.iloc[-1],
-                            frozen_pk.frozen_retained,
-                            int(frozen_pk.step),
-                            frozen_end,
-                            frozen_pk.sim_above_shuffle,
-                            frozen_pk.frozen_retained - frozen_end,
-                            stitched_pk.stitched_retained,
-                            int(stitched_pk.step),
-                            stitched_end,
-                            stitched_pk.sim_above_shuffle,
-                            stitched_pk.stitched_retained - stitched_end,
-                            ))
-
-        for (name, gap_nats, r_peak, r_pstep, r_end, r_drop, r_peak_sim, r_sim_end,
-             xs_var, xl_var,
-             f_peak, f_pstep, f_end, f_peak_sim, f_drop,
-             s_peak, s_pstep, s_end, s_peak_sim, s_drop) in summary:
-            print(f"{name:15s} | gap nats {gap_nats:3f} "
-                  f"| retrained peak {r_peak:3.1%} (step {r_pstep:3d})->{r_end:3.1%} "
-                  f"| sim above shuffle {r_peak_sim:3.1%} (step {r_pstep:3d})->{r_sim_end:3.1%} "
-                  f"| frozen peak {f_peak:3.1%} (step {f_pstep:3d})->{f_end:3.1%}"
-                  f"| stitched peak {s_peak:3.1%} (step {s_pstep:3d})->{s_end:3.1%}"
-                  f"| XL var {xl_var:3.1} | XS var {xs_var:3.1}")
-
+            rows.append(dict(
+                name=name,
+                gap_nats=r_pk.gap_nats,
+                r_peak=r_pk.retained, r_peak_step=r_pk.step,
+                r_end=last.retained, r_drop=r_pk.retained - last.retained,
+                r_peak_sim=r_pk.sim_above_shuffle, sim_end=last.sim_above_shuffle,
+                f_peak=f_pk.frozen_retained, f_peak_step=f_pk.step,
+                f_end=last.frozen_retained, f_drop=f_pk.frozen_retained - last.frozen_retained,
+                s_peak=s_pk.stitched_retained, s_peak_step=s_pk.step,
+                s_end=last.stitched_retained, s_drop=s_pk.stitched_retained - last.stitched_retained,
+                xs_var=last.xs_var, xl_var=last.xl_var,
+            ))
 
         ax[0].axhline(1.0, ls=(0, (4, 3)), c='#999999', lw=0.8, zorder=0)
         ax[0].set_ylabel('retained (%)')
@@ -128,64 +247,47 @@ def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=
             fig.suptitle(title, y=1.04, fontsize=11, x=0.005, ha='left')
         fig.tight_layout(w_pad=2.0)
         plt.show()
-    return summary
+
+    table = summary_table(rows, FUNCTIONAL_SPEC, caption=title or 'Functional transfer')
+    if show_table:
+        _show(table)
+    return pd.DataFrame(rows).set_index('name')
 
 
-def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=True):
-    """paths: {label: path_to_trajectory_csv}"""
+def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=True,
+                                   show_table=True):
+    """paths: {label: path_to_trajectory_csv}. Returns the summary DataFrame."""
+    rows = []
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 2, figsize=figsize)
         ax = ax.ravel()
-        summary = []
         mk = dict(marker='o', ms=2.5) if markers else {}
 
         for i, (name, path) in enumerate(paths.items()):
-            d = (pd.read_csv(path)
-                   .drop_duplicates(subset='step', keep='last')
-                   .sort_values('step'))
+            d = _load(path)
             c = PALETTE[i % len(PALETTE)]
 
             fit = d[d.step > 0]
             ax[0].plot(d.step, d.sim_above_shuffle * 100, color=c, label=name, **mk)
             ax[1].plot(fit.step, fit.centered_sim * 100, color=c, label=name, **mk)
 
-            # --- SAFETY CHECKS ---
-            if d.retained.isna().all() or d.frozen_retained.isna().all():
-                print(f"Skipping peak plotting for {name}: column contains only NaN")
-                # Append to summary with NaNs or dummy values to prevent unpacking errors later
-                summary.append((name, float('nan'), float('nan'), -1, float('nan'),
-                                float('nan'), float('nan'), float('nan'), -1,
-                                float('nan'), float('nan'), float('nan')))
-                continue # Skip to next trajectory
+            if d.retained.isna().all():
+                print(f"Skipping peaks for {name}: retained is all NaN")
+                rows.append(_empty_row(name, GEOMETRIC_SPEC))
+                continue
 
-            retrained_pk = d.loc[d.retained.idxmax()]
-            retrained_end = d.retained.iloc[-1]
-            frozen_end = d.frozen_retained.iloc[-1]
-            stitched_end = d.stitched_retained.iloc[-1]
-
-            summary.append((name,
-                            retrained_pk.gap_nats,
-                            retrained_pk.retained,
-                            int(retrained_pk.step),
-                            retrained_end,
-                            retrained_pk.sim_above_shuffle,
-                            retrained_pk.retained - retrained_end,
-                            retrained_pk.frozen_retained,
-                            retrained_pk.stitched_retained,
-                            retrained_pk.sim_above_shuffle,
-                            retrained_pk.centered_sim,
-                            retrained_pk.xs_scale,
-                            retrained_pk.xl_scale,
-                            ))
-
-        for (name, gap_nats, r_peak, r_pstep, r_end, r_peak_sim, r_drop,
-             r_frozen, r_stitched, r_sim, r_cen, xs_scale, xl_scale) in summary:
-            print(f"{name:15s} | gap nats {gap_nats:3f} "
-                  f"| retrained peak {r_peak:3.1%} (step {r_pstep:3d})->{r_end:3.1%} | "
-                  f" @ retrained peak (frozen:  {r_frozen:3.1%}, "
-                  f"stitched: {r_stitched:3.1%}, sim above shuffle: "
-                  f"{r_sim:3.1%}, centered sim: {r_cen:3.1%} | "
-                  f"XS scale {xs_scale:6.1}, XL scale {xl_scale:6.1}")
+            pk = d.loc[d.retained.idxmax()]
+            end = d.retained.iloc[-1]
+            rows.append(dict(
+                name=name,
+                gap_nats=pk.gap_nats,
+                r_peak=pk.retained, r_peak_step=pk.step,
+                r_end=end, r_drop=pk.retained - end,
+                frozen=pk.frozen_retained, stitched=pk.stitched_retained,
+                sim=pk.sim_above_shuffle, centered=pk.centered_sim,
+                sim_end=d.sim_above_shuffle.iloc[-1], centered_end=d.centered_sim.iloc[-1],
+                xs_scale=pk.xs_scale, xl_scale=pk.xl_scale,
+            ))
 
         ax[0].axhline(1.0, ls=(0, (4, 3)), c='#999999', lw=0.8, zorder=0)
         ax[0].set_ylabel('sim above shuffle')
@@ -203,49 +305,41 @@ def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=Tr
             fig.suptitle(title, y=1.04, fontsize=11, x=0.005, ha='left')
         fig.tight_layout(w_pad=2.0)
         plt.show()
-    return summary
+
+    table = summary_table(rows, GEOMETRIC_SPEC, caption=title or 'Geometric similarity')
+    if show_table:
+        _show(table)
+    return pd.DataFrame(rows).set_index('name')
 
 
-def plot_bidirectional(paths, title=None, figsize=(9, 4)):
+def plot_bidirectional(paths, title=None, figsize=(9, 4), show_table=True):
     """Diagnose the bidirectional arm across alpha.
 
-    paths: {label: trajectory.csv}  — one entry per alpha.
+    paths: {label: trajectory.csv} — one entry per alpha. Returns the summary DataFrame.
     """
-    summary = []
+    rows = []
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 2, figsize=figsize)
         ax = ax.ravel()
 
         for i, (name, path) in enumerate(paths.items()):
-            d = (pd.read_csv(path)
-                   .drop_duplicates(subset='step', keep='last')
-                   .sort_values('step'))
+            d = _load(path)
             c = PALETTE[i % len(PALETTE)]
-
 
             xl_var = d.xl_identity_mse / d.xl_cycle_fvu
             xs2xl_fvu = d.xs2xl_mse / xl_var
 
-            # --- the two halves of the trade ---
             ax[0].plot(d.step, d.xl_cycle_fvu, color=c, label=name)
             ax[0].plot(d.step, xs2xl_fvu, color=c, ls=':', alpha=.7)
 
-            # --- convergence scatter ---
-            ax[1].scatter(d.xl_cycle_fvu.iloc[-1], d.retained.iloc[-1] * 100,
-                          color=c, s=70, zorder=5, label=name)
-            ax[1].annotate(name.split()[-1], (d.xl_cycle_fvu.iloc[-1],
-                                              d.retained.iloc[-1] * 100),
+            x_end, r_end = d.xl_cycle_fvu.iloc[-1], d.retained.iloc[-1]
+            ax[1].scatter(x_end, r_end * 100, color=c, s=70, zorder=5, label=name)
+            ax[1].annotate(name.split()[-1], (x_end, r_end * 100),
                            textcoords='offset points', xytext=(7, -3), fontsize=8, color=c)
-            xl_cycle_fvu_end = d.xl_cycle_fvu.iloc[-1]
-            xs2xl_fvu_end = xs2xl_fvu.iloc[-1]
-            summary.append((name,
-                            d.xl_cycle_fvu.iloc[-1],
-                            xs2xl_fvu.iloc[-1],
-                            xl_var.iloc[-1]))
 
-        for (name, cycle_fvu, xs2xl_fvu, xl_var) in summary:
-          print(f"{name:15s} | xl_cycle_fvu {cycle_fvu:3f} "
-                f"| xs2xl_fvu {xs2xl_fvu:3f} | xl var {xl_var:3f}")
+            xs_var = d.xs_var.iloc[-1] if 'xs_var' in d else float('nan')
+            rows.append(dict(name=name, xl_cycle_fvu=x_end, xs2xl_fvu=xs2xl_fvu.iloc[-1],
+                             xl_var=xl_var.iloc[-1], xs_var=xs_var, retained=r_end))
 
         ax[0].set_ylabel('FVU')
         ax[0].set_xlabel('align-head fit step')
@@ -262,4 +356,8 @@ def plot_bidirectional(paths, title=None, figsize=(9, 4)):
             fig.suptitle(title, y=1.02, fontsize=11, x=0.005, ha='left')
         fig.tight_layout(w_pad=2.0)
         plt.show()
-        return summary
+
+    table = summary_table(rows, BIDIRECTIONAL_SPEC, caption=title or 'Bidirectional arm')
+    if show_table:
+        _show(table)
+    return pd.DataFrame(rows).set_index('name')
