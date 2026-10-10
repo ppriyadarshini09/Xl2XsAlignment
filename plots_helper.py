@@ -40,43 +40,36 @@ PALETTE = ['#4C72B0', '#DD8452', '#55A868', '#C44E52', '#8172B3', '#937860']
 
 
 # ---------------------------------------------------------------------------
-# Summary tables
+# Summary table spec
 # ---------------------------------------------------------------------------
-# Each table is described by a spec: an ordered list of
-#   (group, label, key, fmt, better[, step_key])
+# One row per (group, label, key, fmt, better[, step_key]):
 # group    : top-level header (columns with the same group are merged)
 # label    : sub-header shown under the group
-# key      : key in the per-run summary dict
+# key      : metric key produced by trajectory_metrics()
 # fmt      : format string for the cell
 # better   : 'high' / 'low' -> shaded green where favourable; None -> no shading
 # step_key : optional; appends " @ <step>" to the cell (shading still uses `key`)
+# Columns that are NaN for every row (e.g. FVU for non-bidirectional arms) are dropped.
 PCT, FLT, INT, SCI = '{:.1%}', '{:.3f}', '{:d}', '{:.2e}'
 
-FUNCTIONAL_SPEC = [
-    ('Retrained', 'peak @ step', 'r_peak', PCT, 'high', 'r_peak_step'),
-    ('Retrained', 'end',         'r_end',  PCT, 'high'),
-    ('Retrained', 'drop',        'r_drop', PCT, 'low'),
-    ('Frozen',    'peak @ step', 'f_peak', PCT, 'high', 'f_peak_step'),
-    ('Frozen',    'end',         'f_end',  PCT, 'high'),
-    ('Frozen',    'drop',        'f_drop', PCT, 'low'),
-    ('Stitched',  'peak @ step', 's_peak', PCT, 'high', 's_peak_step'),
-    ('Stitched',  'end',         's_end',  PCT, 'high'),
-    ('Stitched',  'drop',        's_drop', PCT, 'low'),
-]
-
-GEOMETRIC_SPEC = [
-    ('Sim > shuffle', '@ retrained peak', 'sim',          PCT, 'high', 'r_peak_step'),
-    ('Sim > shuffle', 'end',              'sim_end',      PCT, 'high'),
-    ('Centered sim',  '@ retrained peak', 'centered',     PCT, 'high', 'r_peak_step'),
-    ('Centered sim',  'end',              'centered_end', PCT, 'high'),
-]
-
-BIDIRECTIONAL_SPEC = [
-    ('At convergence', 'XL cycle FVU', 'xl_cycle_fvu', FLT, 'low'),
-    ('At convergence', 'XS→XL FVU',    'xs2xl_fvu',    FLT, 'low'),
-    ('At convergence', 'XL var',       'xl_var',       SCI, None),
-    ('At convergence', 'XS var',       'xs_var',       SCI, None),
-    ('At convergence', 'retained',     'retained',     PCT, 'high'),
+SUMMARY_SPEC = [
+    ('Retrained',      'peak @ step',      'r_peak',       PCT, 'high', 'r_peak_step'),
+    ('Retrained',      'end',              'r_end',        PCT, 'high'),
+    ('Retrained',      'drop',             'r_drop',       PCT, 'low'),
+    ('Frozen',         'peak @ step',      'f_peak',       PCT, 'high', 'f_peak_step'),
+    ('Frozen',         'end',              'f_end',        PCT, 'high'),
+    ('Frozen',         'drop',             'f_drop',       PCT, 'low'),
+    ('Stitched',       'peak @ step',      's_peak',       PCT, 'high', 's_peak_step'),
+    ('Stitched',       'end',              's_end',        PCT, 'high'),
+    ('Stitched',       'drop',             's_drop',       PCT, 'low'),
+    ('Sim > shuffle',  '@ retrained peak', 'sim',          PCT, 'high'),
+    ('Sim > shuffle',  'end',              'sim_end',      PCT, 'high'),
+    ('Centered sim',   '@ retrained peak', 'centered',     PCT, 'high'),
+    ('Centered sim',   'end',              'centered_end', PCT, 'high'),
+    ('FVU (end)',      'XL cycle',         'xl_cycle_fvu', FLT, 'low'),
+    ('FVU (end)',      'XS→XL',            'xs2xl_fvu',    FLT, 'low'),
+    ('Variance (end)', 'XL',               'xl_var',       SCI, None),
+    ('Variance (end)', 'XS',               'xs_var',       SCI, None),
 ]
 
 
@@ -306,86 +299,107 @@ def common_seeds(paths, recompute=None, force_recompute=False, verbose=True):
     return seeds, {name: {s: per[name][s] for s in seeds} for name in per}
 
 
-def _prepare(paths, recompute, force_recompute):
-    return common_seeds(paths, recompute, force_recompute)
-
-
-def seed_rows(by_seed, row_fn, spec):
-    """One row per run name: the single-seed row, or mean (+ *_std) across seeds."""
-    keys = [s[2] for s in spec] + [s[5] for s in spec if len(s) > 5]
-    rows = []
-    for name, per_seed in by_seed.items():
-        recs = pd.DataFrame([row_fn(_load(p)) for p in per_seed.values()]).reindex(columns=keys)
-        row = {'name': name, **recs.mean().to_dict()}
-        if len(recs) > 1:
-            row.update({f'{k}_std': v for k, v in recs.std(ddof=1).to_dict().items()})
-            for s in spec:                      # steps: mean, rounded to an int
-                if len(s) > 5 and not _isnan(row[s[5]]):
-                    row[s[5]] = round(row[s[5]])
-        rows.append(row)
-    return rows
-
-
-def _caption(base, seeds):
-    if seeds == [None]:
-        return base
-    return f"{base} — mean ± std over seeds {', '.join(f's{s}' for s in seeds)}"
-
-
 _NAN = float('nan')
 
 
-def functional_row(d):
-    if any(d[c].isna().all() for c in ('retained', 'frozen_retained', 'stitched_retained')):
-        return {}
-    r_pk = d.loc[d.retained.idxmax()]
-    f_pk = d.loc[d.frozen_retained.idxmax()]
-    s_pk = d.loc[d.stitched_retained.idxmax()]
+def _col(d, c):
+    return d[c] if c in d and not d[c].isna().all() else None
+
+
+def trajectory_metrics(d):
+    """All summary numbers for one trajectory DataFrame (one seed, one arm)."""
+    m = {}
     last = d.iloc[-1]
-    return dict(
-        r_peak=r_pk.retained, r_peak_step=r_pk.step,
-        r_end=last.retained, r_drop=r_pk.retained - last.retained,
-        f_peak=f_pk.frozen_retained, f_peak_step=f_pk.step,
-        f_end=last.frozen_retained, f_drop=f_pk.frozen_retained - last.frozen_retained,
-        s_peak=s_pk.stitched_retained, s_peak_step=s_pk.step,
-        s_end=last.stitched_retained, s_drop=s_pk.stitched_retained - last.stitched_retained,
-    )
+    r = _col(d, 'retained')
+    r_pk = d.loc[r.idxmax()] if r is not None else None
+
+    for pre, c in (('r', 'retained'), ('f', 'frozen_retained'), ('s', 'stitched_retained')):
+        s = _col(d, c)
+        if s is None:
+            continue
+        pk = d.loc[s.idxmax()]
+        m.update({f'{pre}_peak': pk[c], f'{pre}_peak_step': pk.step,
+                  f'{pre}_end': last[c], f'{pre}_drop': pk[c] - last[c]})
+
+    for key, c in (('sim', 'sim_above_shuffle'), ('centered', 'centered_sim')):
+        if _col(d, c) is not None:
+            m[f'{key}_end'] = last[c]
+            if r_pk is not None:
+                m[key] = r_pk[c]
+
+    if _col(d, 'xl_cycle_fvu') is not None:
+        xl_var = d.xl_identity_mse / d.xl_cycle_fvu
+        m['xl_cycle_fvu'] = last.xl_cycle_fvu
+        m['xl_var'] = xl_var.iloc[-1]
+        if 'xs2xl_mse' in d:
+            m['xs2xl_fvu'] = (d.xs2xl_mse / xl_var).iloc[-1]
+    if _col(d, 'xl_var') is not None:
+        m['xl_var'] = last.xl_var
+    if _col(d, 'xs_var') is not None:
+        m['xs_var'] = last.xs_var
+    return m
 
 
-def geometric_row(d):
-    if d.retained.isna().all():
-        return {}
-    pk = d.loc[d.retained.idxmax()]
-    return dict(r_peak_step=pk.step,
-                sim=pk.sim_above_shuffle, sim_end=d.sim_above_shuffle.iloc[-1],
-                centered=pk.centered_sim, centered_end=d.centered_sim.iloc[-1])
+def _aggregate(per_seed_metrics, spec):
+    """Mean over seeds (+ *_std when >1 seed); peak steps averaged and rounded."""
+    keys = [s[2] for s in spec] + [s[5] for s in spec if len(s) > 5]
+    recs = pd.DataFrame(per_seed_metrics).reindex(columns=keys)
+    row = recs.mean().to_dict()
+    if len(recs) > 1:
+        row.update({f'{k}_std': v for k, v in recs.std(ddof=1).to_dict().items()})
+        for s in spec:
+            if len(s) > 5 and not _isnan(row[s[5]]):
+                row[s[5]] = round(row[s[5]])
+    return row
 
 
-def bidirectional_row(d):
-    xl_var = d.xl_identity_mse / d.xl_cycle_fvu
-    return dict(xl_cycle_fvu=d.xl_cycle_fvu.iloc[-1],
-                xs2xl_fvu=(d.xs2xl_mse / xl_var).iloc[-1],
-                xl_var=xl_var.iloc[-1],
-                xs_var=d.xs_var.iloc[-1] if 'xs_var' in d else _NAN,
-                retained=d.retained.iloc[-1])
+def seed_summary_table(paths, recompute=None, force_recompute=False, title=None,
+                       spec=SUMMARY_SPEC, show=True):
+    """One combined, shaded table over every seed available for *all* paths.
+
+    paths     : {label: trajectory.csv of any one seed} — the same dict you pass to plots.
+    recompute : dict(model_bank_dir, eval_batches, train_config, traj_config[, fn]).
+                Seeds whose run dir exists without trajectory.csv are recomputed;
+                each csv is recomputed at most once per session (force_recompute=True
+                to redo). Omit to use the csvs as they are.
+    Each csv is read once. Returns (numeric DataFrame, per-seed long DataFrame).
+    """
+    seeds, by_seed = common_seeds(paths, recompute, force_recompute)
+
+    long_rows, rows = [], []
+    for name, per in by_seed.items():
+        per_seed = []
+        for seed, p in per.items():
+            m = trajectory_metrics(_load(p))
+            per_seed.append(m)
+            long_rows.append({'name': name, 'seed': seed, **m})
+        rows.append({'name': name, **_aggregate(per_seed, spec)})
+
+    df = pd.DataFrame(rows).set_index('name')
+    keep = [s for s in spec if s[2] in df and df[s[2]].notna().any()]
+    caption = title or 'Summary'
+    if seeds != [None]:
+        caption += f" — mean ± std over seeds {', '.join(f's{s}' for s in seeds)}"
+    table = summary_table(rows, keep, caption=caption)
+    if show:
+        _show(table)
+    return df, pd.DataFrame(long_rows)
 
 
 # ---------------------------------------------------------------------------
-# Plots
+# Plots (single run per label, exactly the paths given)
 # ---------------------------------------------------------------------------
-def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=True,
-                                  show_table=True, recompute=None, force_recompute=False):
-    """paths: {label: path_to_trajectory_csv}. Plots use these paths as given; the table
-    uses every seed that exists for *all* paths (mean ± std). Pass `recompute` (see
-    recompute_all) to refresh each csv once before plotting. Returns the summary DataFrame."""
-    seeds, by_seed = _prepare(paths, recompute, force_recompute)
+def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=True):
+    """paths: {label: path_to_trajectory_csv}. Plots only; use seed_summary_table for numbers."""
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 3, figsize=figsize)
         ax = ax.ravel()
         mk = dict(marker='o', ms=2.5) if markers else {}
 
         for i, (name, path) in enumerate(paths.items()):
-            d = _load(path)
+            d = (pd.read_csv(path)
+                   .drop_duplicates(subset='step', keep='last')
+                   .sort_values('step'))
             c = PALETTE[i % len(PALETTE)]
 
             fit = d[d.step > 0]
@@ -393,20 +407,18 @@ def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=
             ax[1].plot(fit.step, fit.frozen_retained * 100, color=c, label=name, **mk)
             ax[2].plot(fit.step, fit.stitched_retained * 100, color=c, label=name, **mk)
 
-            needed = ['retained', 'frozen_retained', 'stitched_retained']
-            if any(d[col].isna().all() for col in needed):
-                print(f"Skipping peaks for {name}: a retained column is all NaN")
-                continue
+            # --- SAFETY CHECKS ---
+            if d.retained.isna().all() or d.frozen_retained.isna().all():
+                print(f"Skipping peak plotting for {name}: column contains only NaN")
+                continue # Skip to next trajectory
 
-            r_pk = d.loc[d.retained.idxmax()]
-            f_pk = d.loc[d.frozen_retained.idxmax()]
-            s_pk = d.loc[d.stitched_retained.idxmax()]
-
-            ax[0].plot(r_pk.step, r_pk.retained * 100, marker='o', ms=6, mfc='none',
+            retrained_pk = d.loc[d.retained.idxmax()]
+            frozen_pk = d.loc[d.frozen_retained.idxmax()]
+            ax[0].plot(retrained_pk.step, retrained_pk.retained * 100, marker='o', ms=6, mfc='none',
                        mec=c, mew=1.4, ls='none', zorder=5)
-            ax[1].plot(f_pk.step, f_pk.frozen_retained * 100, marker='o', ms=6, mfc='none',
+            ax[1].plot(frozen_pk.step, frozen_pk.frozen_retained * 100, marker='o', ms=6, mfc='none',
                        mec=c, mew=1.4, ls='none', zorder=5)
-            ax[2].plot(f_pk.step, f_pk.stitched_retained * 100, marker='o', ms=6, mfc='none',
+            ax[2].plot(frozen_pk.step, frozen_pk.stitched_retained * 100, marker='o', ms=6, mfc='none',
                        mec=c, mew=1.4, ls='none', zorder=5)
 
         ax[0].axhline(1.0, ls=(0, (4, 3)), c='#999999', lw=0.8, zorder=0)
@@ -428,34 +440,23 @@ def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=
         fig.tight_layout(w_pad=2.0)
         plt.show()
 
-    rows = seed_rows(by_seed, functional_row, FUNCTIONAL_SPEC)
-    table = summary_table(rows, FUNCTIONAL_SPEC, caption=_caption(title or 'Functional transfer', seeds))
-    if show_table:
-        _show(table)
-    return pd.DataFrame(rows).set_index('name')
 
-
-def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=True,
-                                   show_table=True, recompute=None, force_recompute=False):
-    """paths: {label: path_to_trajectory_csv}. See plot_functional_transfer_traj for
-    seeds / recompute. Returns the summary DataFrame."""
-    seeds, by_seed = _prepare(paths, recompute, force_recompute)
+def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=True):
+    """paths: {label: path_to_trajectory_csv}. Plots only; use seed_summary_table for numbers."""
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 2, figsize=figsize)
         ax = ax.ravel()
         mk = dict(marker='o', ms=2.5) if markers else {}
 
         for i, (name, path) in enumerate(paths.items()):
-            d = _load(path)
+            d = (pd.read_csv(path)
+                   .drop_duplicates(subset='step', keep='last')
+                   .sort_values('step'))
             c = PALETTE[i % len(PALETTE)]
 
             fit = d[d.step > 0]
             ax[0].plot(d.step, d.sim_above_shuffle * 100, color=c, label=name, **mk)
             ax[1].plot(fit.step, fit.centered_sim * 100, color=c, label=name, **mk)
-
-            if d.retained.isna().all():
-                print(f"Skipping peaks for {name}: retained is all NaN")
-                continue
 
         ax[0].axhline(1.0, ls=(0, (4, 3)), c='#999999', lw=0.8, zorder=0)
         ax[0].set_ylabel('sim above shuffle')
@@ -474,40 +475,35 @@ def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=Tr
         fig.tight_layout(w_pad=2.0)
         plt.show()
 
-    rows = seed_rows(by_seed, geometric_row, GEOMETRIC_SPEC)
-    table = summary_table(rows, GEOMETRIC_SPEC, caption=_caption(title or 'Geometric similarity', seeds))
-    if show_table:
-        _show(table)
-    return pd.DataFrame(rows).set_index('name')
 
-
-def plot_bidirectional(paths, title=None, figsize=(9, 4), show_table=True,
-                       recompute=None, force_recompute=False):
+def plot_bidirectional(paths, title=None, figsize=(9, 4)):
     """Diagnose the bidirectional arm across alpha.
 
-    paths: {label: trajectory.csv} — one entry per alpha. See plot_functional_transfer_traj
-    for seeds / recompute. Returns the summary DataFrame.
+    paths: {label: trajectory.csv}  — one entry per alpha.
     """
-    seeds, by_seed = _prepare(paths, recompute, force_recompute)
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 2, figsize=figsize)
         ax = ax.ravel()
 
         for i, (name, path) in enumerate(paths.items()):
-            d = _load(path)
+            d = (pd.read_csv(path)
+                   .drop_duplicates(subset='step', keep='last')
+                   .sort_values('step'))
             c = PALETTE[i % len(PALETTE)]
 
             xl_var = d.xl_identity_mse / d.xl_cycle_fvu
             xs2xl_fvu = d.xs2xl_mse / xl_var
 
+            # --- the two halves of the trade ---
             ax[0].plot(d.step, d.xl_cycle_fvu, color=c, label=name)
             ax[0].plot(d.step, xs2xl_fvu, color=c, ls=':', alpha=.7)
 
-            x_end, r_end = d.xl_cycle_fvu.iloc[-1], d.retained.iloc[-1]
-            ax[1].scatter(x_end, r_end * 100, color=c, s=70, zorder=5, label=name)
-            ax[1].annotate(name.split()[-1], (x_end, r_end * 100),
+            # --- convergence scatter ---
+            ax[1].scatter(d.xl_cycle_fvu.iloc[-1], d.retained.iloc[-1] * 100,
+                          color=c, s=70, zorder=5, label=name)
+            ax[1].annotate(name.split()[-1], (d.xl_cycle_fvu.iloc[-1],
+                                              d.retained.iloc[-1] * 100),
                            textcoords='offset points', xytext=(7, -3), fontsize=8, color=c)
-
 
         ax[0].set_ylabel('FVU')
         ax[0].set_xlabel('align-head fit step')
@@ -524,9 +520,3 @@ def plot_bidirectional(paths, title=None, figsize=(9, 4), show_table=True,
             fig.suptitle(title, y=1.02, fontsize=11, x=0.005, ha='left')
         fig.tight_layout(w_pad=2.0)
         plt.show()
-
-    rows = seed_rows(by_seed, bidirectional_row, BIDIRECTIONAL_SPEC)
-    table = summary_table(rows, BIDIRECTIONAL_SPEC, caption=_caption(title or 'Bidirectional arm', seeds))
-    if show_table:
-        _show(table)
-    return pd.DataFrame(rows).set_index('name')
