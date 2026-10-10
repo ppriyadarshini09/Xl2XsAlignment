@@ -49,16 +49,22 @@ PALETTE = ['#4C72B0', '#DD8452', '#55A868', '#C44E52', '#8172B3', '#937860']
 # fmt      : format string for the cell
 # better   : 'high' / 'low' -> shaded green where favourable; None -> no shading
 # step_key : optional; appends " @ <step>" to the cell (shading still uses `key`)
+# 'gap (nats)' is each metric's denominator:
+#   Retrained / Frozen : xs_probe_loss - xl_probe_loss   (gap_nats)
+#   Stitched           : xs_loss - xl_loss                (model CE, from get_alignment_geometry)
 # Columns that are NaN for every row (e.g. FVU for non-bidirectional arms) are dropped.
 PCT, FLT, INT, SCI = '{:.1%}', '{:.3f}', '{:d}', '{:.2e}'
 
 SUMMARY_SPEC = [
+    ('Retrained',      'gap (nats)',       'r_gap',        FLT, None),
     ('Retrained',      'peak @ step',      'r_peak',       PCT, 'high', 'r_peak_step'),
     ('Retrained',      'end',              'r_end',        PCT, 'high'),
     ('Retrained',      'drop',             'r_drop',       PCT, 'low'),
+    ('Frozen',         'gap (nats)',       'f_gap',        FLT, None),
     ('Frozen',         'peak @ step',      'f_peak',       PCT, 'high', 'f_peak_step'),
     ('Frozen',         'end',              'f_end',        PCT, 'high'),
     ('Frozen',         'drop',             'f_drop',       PCT, 'low'),
+    ('Stitched',       'gap (nats)',       's_gap',        FLT, None),
     ('Stitched',       'peak @ step',      's_peak',       PCT, 'high', 's_peak_step'),
     ('Stitched',       'end',              's_end',        PCT, 'high'),
     ('Stitched',       'drop',             's_drop',       PCT, 'low'),
@@ -320,6 +326,18 @@ def trajectory_metrics(d):
         pk = d.loc[s.idxmax()]
         m.update({f'{pre}_peak': pk[c], f'{pre}_peak_step': pk.step,
                   f'{pre}_end': last[c], f'{pre}_drop': pk[c] - last[c]})
+
+    # denominators (constant over steps; take the last row)
+    if _col(d, 'gap_nats') is not None:
+        probe_gap = last.gap_nats
+    elif _col(d, 'xs_probe_loss') is not None and _col(d, 'xl_probe_loss') is not None:
+        probe_gap = last.xs_probe_loss - last.xl_probe_loss
+    else:
+        probe_gap = _NAN
+    if 'r_peak' in m: m['r_gap'] = probe_gap
+    if 'f_peak' in m: m['f_gap'] = probe_gap
+    if 's_peak' in m and _col(d, 'xs_loss') is not None and _col(d, 'xl_loss') is not None:
+        m['s_gap'] = last.xs_loss - last.xl_loss
 
     for key, c in (('sim', 'sim_above_shuffle'), ('centered', 'centered_sim')):
         if _col(d, c) is not None:
