@@ -192,9 +192,17 @@ _RUN_RE = re.compile(
     r'(?:/alpha_(?P<alpha>[^/]+))?/trajectory\.csv$')
 
 
+def _trained(csv_path):
+    """A seed run counts as trained if its csv exists or its traj_probes/ dir does
+    (i.e. training finished but trajectory.csv was never written)."""
+    return (os.path.exists(csv_path) or
+            os.path.isdir(os.path.join(os.path.dirname(csv_path), 'traj_probes')))
+
+
 def seed_paths(path):
-    """{seed: trajectory.csv} for every sibling traj_xl.._xs.._s<seed> dir that has
-    the same sub-path. Paths without a seed component map to {None: path}."""
+    """{seed: trajectory.csv path} for every sibling traj_xl.._xs.._s<seed> dir with the
+    same sub-path that is trained (the csv itself may still be missing).
+    Paths without a seed component map to {None: path}."""
     m = _SEED_RE.search(path)
     if not m:
         return {None: path}
@@ -203,20 +211,9 @@ def seed_paths(path):
     if os.path.isdir(parent or '.'):
         for entry in os.listdir(parent or '.'):
             mm = re.fullmatch(re.escape(prefix) + r'(\d+)', entry)
-            if mm and os.path.exists(parent + entry + rest):
+            if mm and _trained(parent + entry + rest):
                 found[int(mm.group(1))] = parent + entry + rest
     return dict(sorted(found.items()))
-
-
-def common_seeds(paths):
-    """Seeds present for *every* path. Falls back to the given paths only (seed=None)."""
-    per = {name: seed_paths(p) for name, p in paths.items()}
-    common = set.intersection(*(set(s) for s in per.values())) if per else set()
-    common.discard(None)
-    if len(common) < 2:
-        return [None], {name: {None: p} for name, p in paths.items()}
-    seeds = sorted(common)
-    return seeds, {name: {s: per[name][s] for s in seeds} for name in per}
 
 
 def parse_run_path(path):
@@ -236,37 +233,81 @@ def parse_run_path(path):
 _RECOMPUTED = set()   # csv paths already recomputed in this session
 
 
-def recompute_all(paths_by_seed, recompute, force=False):
-    """Run recompute_trajectory_metrics once per csv (all seeds) before plotting.
+def _recompute_fn(recompute):
+    """recompute['fn'] if given, else recompute_trajectory_metrics from the
+    xl2xs_alignhead_traj module, else the one defined in the notebook."""
+    if recompute.get('fn') is not None:
+        return recompute['fn']
+    try:
+        from xl2xs_alignhead_traj import recompute_trajectory_metrics
+        return recompute_trajectory_metrics
+    except ImportError:
+        import __main__
+        fn = getattr(__main__, 'recompute_trajectory_metrics', None)
+        if fn is None:
+            raise ImportError("recompute_trajectory_metrics not found: import "
+                              "xl2xs_alignhead_traj or pass recompute['fn']")
+        return fn
 
+
+def recompute_all(per, recompute, force=False):
+    """Run recompute_trajectory_metrics once per seed csv before plotting.
+
+    per: {name: {seed: csv_path}}
     recompute: dict with model_bank_dir, eval_batches, train_config, traj_config
-               (traj_xs/traj_xl are taken from the path). Optional 'fn' to override
-               the recompute function (default: xl2xs_alignhead_traj's).
+               (traj_xs/traj_xl are taken from the path). Optional 'fn'.
+    Always called with keyword args, so argument order can't go wrong.
     """
-    fn = recompute.get('fn')
-    if fn is None:
-        from xl2xs_alignhead_traj import recompute_trajectory_metrics as fn
-    for by_seed in paths_by_seed.values():
+    fn = _recompute_fn(recompute)
+    for by_seed in per.values():
         for path in by_seed.values():
             if path in _RECOMPUTED and not force:
                 continue
-            a = parse_run_path(path)
+            kw = parse_run_path(path)
             traj_config = {**recompute['traj_config'],
-                           'traj_xl': a.pop('traj_xl'), 'traj_xs': a.pop('traj_xs')}
+                           'traj_xl': kw.pop('traj_xl'), 'traj_xs': kw.pop('traj_xs')}
             try:
                 fn(traj_config=traj_config, model_bank_dir=recompute['model_bank_dir'],
                    eval_batches=recompute['eval_batches'],
-                   train_config=recompute['train_config'], write_csv=True, **a)
+                   train_config=recompute['train_config'], write_csv=True, **kw)
                 _RECOMPUTED.add(path)
-            except Exception as e:          # keep plotting with the existing csv
-                print(f"recompute failed for {path}: {e}")
+            except Exception as e:          # keep going with whatever csv exists
+                print(f"recompute failed for {path}: {type(e).__name__}: {e}")
+
+
+def common_seeds(paths, recompute=None, force_recompute=False, verbose=True):
+    """Seeds whose trajectory.csv exists for *every* path (after optional recompute).
+    Returns (seeds, {name: {seed: csv}}); seeds == [None] means single-run fallback."""
+    per = {name: seed_paths(p) for name, p in paths.items()}
+    if recompute:
+        recompute_all(per, recompute, force=force_recompute)
+
+    have = {name: {s for s, p in d.items() if os.path.exists(p)} for name, d in per.items()}
+    if verbose:
+        for name, d in per.items():
+            status = ', '.join(f"s{s}" + ('' if s in have[name] else ' (no trajectory.csv)')
+                               for s in d if s is not None) or 'no seed in path'
+            print(f"[seeds] {name}: {status}")
+
+    common = set.intersection(*have.values()) if have else set()
+    common.discard(None)
+    if len(common) < 2:
+        if verbose:
+            missing = sorted({s for name, d in per.items() for s in d
+                              if s is not None and s not in have[name]})
+            hint = (f" Seeds {', '.join(f's{s}' for s in missing)} are trained but have no "
+                    f"trajectory.csv — pass recompute=... to write them." if missing else "")
+            print(f"[seeds] fewer than 2 seeds common to all paths; table uses the given "
+                  f"paths only.{hint}")
+        return [None], {name: {None: p} for name, p in paths.items()}
+    seeds = sorted(common)
+    if verbose:
+        print(f"[seeds] table uses {', '.join(f's{s}' for s in seeds)}")
+    return seeds, {name: {s: per[name][s] for s in seeds} for name in per}
 
 
 def _prepare(paths, recompute, force_recompute):
-    seeds, by_seed = common_seeds(paths)
-    if recompute:
-        recompute_all(by_seed, recompute, force=force_recompute)
-    return seeds, by_seed
+    return common_seeds(paths, recompute, force_recompute)
 
 
 def seed_rows(by_seed, row_fn, spec):
