@@ -1,5 +1,7 @@
 # @title Eval plot libraries
 import math
+import os
+import re
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -82,11 +84,15 @@ def _isnan(v):
     return v is None or (isinstance(v, float) and math.isnan(v))
 
 
-def _cell(v, fmt, step=None):
-    """Format one cell; NaN -> em dash, optional ' @ step' suffix."""
+def _cell(v, fmt, step=None, sd=None):
+    """Format one cell; NaN -> em dash, optional ' ± sd' and ' @ step' suffixes."""
     if _isnan(v):
         return '—'
-    s = fmt.format(int(v)) if fmt == INT else fmt.format(v)
+    if sd is not None and not _isnan(sd):
+        s = (f'{v * 100:.1f} ± {sd * 100:.1f}%' if fmt == PCT
+             else f'{fmt.format(v)} ± {fmt.format(sd)}')
+    else:
+        s = fmt.format(int(v)) if fmt == INT else fmt.format(v)
     if step is not None and not _isnan(step):
         s += f' @ {int(step)}'
     return s
@@ -112,8 +118,11 @@ def summary_table(rows, spec, caption=None, cmap='Greens', strength=0.45):
         vals = pd.to_numeric(raw[key], errors='coerce') if key in raw else \
             pd.Series(float('nan'), index=raw.index)
         steps = raw[step_key] if step_key in raw else None
+        sds = raw[key + '_std'] if key + '_std' in raw else None
         num[col] = vals
-        disp[col] = [_cell(v, fmt, None if steps is None else steps.iloc[i])
+        disp[col] = [_cell(v, fmt,
+                           None if steps is None else steps.iloc[i],
+                           None if sds is None else sds.iloc[i])
                      for i, v in enumerate(vals)]
 
     sty = disp.style
@@ -173,17 +182,162 @@ def _load(path):
               .sort_values('step'))
 
 
-def _empty_row(name, spec):
-    return {'name': name, **{s[2]: float('nan') for s in spec}}  # steps -> NaN via reindex
+# ---------------------------------------------------------------------------
+# Seeds and recompute
+# ---------------------------------------------------------------------------
+_SEED_RE = re.compile(r'(traj_xl\d+_xs\d+_s)(\d+)')
+_RUN_RE = re.compile(
+    r'^(?P<base>.*)/traj_xl(?P<xl>\d+)_xs(?P<xs>\d+)_s(?P<seed>\d+)/(?P<site>[^/]+)/'
+    r'(?P<objective>[^_/]+)_(?P<arch>[^/]+)_(?P<scaling>scaled|unscaled)'
+    r'(?:/alpha_(?P<alpha>[^/]+))?/trajectory\.csv$')
+
+
+def seed_paths(path):
+    """{seed: trajectory.csv} for every sibling traj_xl.._xs.._s<seed> dir that has
+    the same sub-path. Paths without a seed component map to {None: path}."""
+    m = _SEED_RE.search(path)
+    if not m:
+        return {None: path}
+    parent, prefix, rest = path[:m.start()], m.group(1), path[m.end():]
+    found = {int(m.group(2)): path}
+    if os.path.isdir(parent or '.'):
+        for entry in os.listdir(parent or '.'):
+            mm = re.fullmatch(re.escape(prefix) + r'(\d+)', entry)
+            if mm and os.path.exists(parent + entry + rest):
+                found[int(mm.group(1))] = parent + entry + rest
+    return dict(sorted(found.items()))
+
+
+def common_seeds(paths):
+    """Seeds present for *every* path. Falls back to the given paths only (seed=None)."""
+    per = {name: seed_paths(p) for name, p in paths.items()}
+    common = set.intersection(*(set(s) for s in per.values())) if per else set()
+    common.discard(None)
+    if len(common) < 2:
+        return [None], {name: {None: p} for name, p in paths.items()}
+    seeds = sorted(common)
+    return seeds, {name: {s: per[name][s] for s in seeds} for name in per}
+
+
+def parse_run_path(path):
+    """Recover recompute_trajectory_metrics kwargs from a trajectory.csv path.
+    Assumes the objective name has no underscore (e.g. 'mse', 'cos')."""
+    m = _RUN_RE.match(path.replace(os.sep, '/'))
+    if not m:
+        raise ValueError(f"unrecognised run layout: {path}")
+    g = m.groupdict()
+    alpha = float(g['alpha'].replace('p', '.').replace('m', '-')) if g['alpha'] else 1.0
+    return dict(base_align_head_dir=g['base'], traj_seed=int(g['seed']),
+                traj_xl=int(g['xl']), traj_xs=int(g['xs']), site=g['site'],
+                objective=g['objective'], arch=g['arch'],
+                scaled=g['scaling'] == 'scaled', alpha=alpha)
+
+
+_RECOMPUTED = set()   # csv paths already recomputed in this session
+
+
+def recompute_all(paths_by_seed, recompute, force=False):
+    """Run recompute_trajectory_metrics once per csv (all seeds) before plotting.
+
+    recompute: dict with model_bank_dir, eval_batches, train_config, traj_config
+               (traj_xs/traj_xl are taken from the path). Optional 'fn' to override
+               the recompute function (default: xl2xs_alignhead_traj's).
+    """
+    fn = recompute.get('fn')
+    if fn is None:
+        from xl2xs_alignhead_traj import recompute_trajectory_metrics as fn
+    for by_seed in paths_by_seed.values():
+        for path in by_seed.values():
+            if path in _RECOMPUTED and not force:
+                continue
+            a = parse_run_path(path)
+            traj_config = {**recompute['traj_config'],
+                           'traj_xl': a.pop('traj_xl'), 'traj_xs': a.pop('traj_xs')}
+            try:
+                fn(traj_config=traj_config, model_bank_dir=recompute['model_bank_dir'],
+                   eval_batches=recompute['eval_batches'],
+                   train_config=recompute['train_config'], write_csv=True, **a)
+                _RECOMPUTED.add(path)
+            except Exception as e:          # keep plotting with the existing csv
+                print(f"recompute failed for {path}: {e}")
+
+
+def _prepare(paths, recompute, force_recompute):
+    seeds, by_seed = common_seeds(paths)
+    if recompute:
+        recompute_all(by_seed, recompute, force=force_recompute)
+    return seeds, by_seed
+
+
+def seed_rows(by_seed, row_fn, spec):
+    """One row per run name: the single-seed row, or mean (+ *_std) across seeds."""
+    keys = [s[2] for s in spec] + [s[5] for s in spec if len(s) > 5]
+    rows = []
+    for name, per_seed in by_seed.items():
+        recs = pd.DataFrame([row_fn(_load(p)) for p in per_seed.values()]).reindex(columns=keys)
+        row = {'name': name, **recs.mean().to_dict()}
+        if len(recs) > 1:
+            row.update({f'{k}_std': v for k, v in recs.std(ddof=1).to_dict().items()})
+            for s in spec:                      # steps: mean, rounded to an int
+                if len(s) > 5 and not _isnan(row[s[5]]):
+                    row[s[5]] = round(row[s[5]])
+        rows.append(row)
+    return rows
+
+
+def _caption(base, seeds):
+    if seeds == [None]:
+        return base
+    return f"{base} — mean ± std over seeds {', '.join(f's{s}' for s in seeds)}"
+
+
+_NAN = float('nan')
+
+
+def functional_row(d):
+    if any(d[c].isna().all() for c in ('retained', 'frozen_retained', 'stitched_retained')):
+        return {}
+    r_pk = d.loc[d.retained.idxmax()]
+    f_pk = d.loc[d.frozen_retained.idxmax()]
+    s_pk = d.loc[d.stitched_retained.idxmax()]
+    last = d.iloc[-1]
+    return dict(
+        r_peak=r_pk.retained, r_peak_step=r_pk.step,
+        r_end=last.retained, r_drop=r_pk.retained - last.retained,
+        f_peak=f_pk.frozen_retained, f_peak_step=f_pk.step,
+        f_end=last.frozen_retained, f_drop=f_pk.frozen_retained - last.frozen_retained,
+        s_peak=s_pk.stitched_retained, s_peak_step=s_pk.step,
+        s_end=last.stitched_retained, s_drop=s_pk.stitched_retained - last.stitched_retained,
+    )
+
+
+def geometric_row(d):
+    if d.retained.isna().all():
+        return {}
+    pk = d.loc[d.retained.idxmax()]
+    return dict(r_peak_step=pk.step,
+                sim=pk.sim_above_shuffle, sim_end=d.sim_above_shuffle.iloc[-1],
+                centered=pk.centered_sim, centered_end=d.centered_sim.iloc[-1])
+
+
+def bidirectional_row(d):
+    xl_var = d.xl_identity_mse / d.xl_cycle_fvu
+    return dict(xl_cycle_fvu=d.xl_cycle_fvu.iloc[-1],
+                xs2xl_fvu=(d.xs2xl_mse / xl_var).iloc[-1],
+                xl_var=xl_var.iloc[-1],
+                xs_var=d.xs_var.iloc[-1] if 'xs_var' in d else _NAN,
+                retained=d.retained.iloc[-1])
 
 
 # ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
 def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=True,
-                                  show_table=True):
-    """paths: {label: path_to_trajectory_csv}. Returns the summary DataFrame."""
-    rows = []
+                                  show_table=True, recompute=None, force_recompute=False):
+    """paths: {label: path_to_trajectory_csv}. Plots use these paths as given; the table
+    uses every seed that exists for *all* paths (mean ± std). Pass `recompute` (see
+    recompute_all) to refresh each csv once before plotting. Returns the summary DataFrame."""
+    seeds, by_seed = _prepare(paths, recompute, force_recompute)
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 3, figsize=figsize)
         ax = ax.ravel()
@@ -201,13 +355,11 @@ def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=
             needed = ['retained', 'frozen_retained', 'stitched_retained']
             if any(d[col].isna().all() for col in needed):
                 print(f"Skipping peaks for {name}: a retained column is all NaN")
-                rows.append(_empty_row(name, FUNCTIONAL_SPEC))
                 continue
 
             r_pk = d.loc[d.retained.idxmax()]
             f_pk = d.loc[d.frozen_retained.idxmax()]
             s_pk = d.loc[d.stitched_retained.idxmax()]
-            last = d.iloc[-1]
 
             ax[0].plot(r_pk.step, r_pk.retained * 100, marker='o', ms=6, mfc='none',
                        mec=c, mew=1.4, ls='none', zorder=5)
@@ -215,19 +367,6 @@ def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=
                        mec=c, mew=1.4, ls='none', zorder=5)
             ax[2].plot(f_pk.step, f_pk.stitched_retained * 100, marker='o', ms=6, mfc='none',
                        mec=c, mew=1.4, ls='none', zorder=5)
-
-            rows.append(dict(
-                name=name,
-                gap_nats=r_pk.gap_nats,
-                r_peak=r_pk.retained, r_peak_step=r_pk.step,
-                r_end=last.retained, r_drop=r_pk.retained - last.retained,
-                r_peak_sim=r_pk.sim_above_shuffle, sim_end=last.sim_above_shuffle,
-                f_peak=f_pk.frozen_retained, f_peak_step=f_pk.step,
-                f_end=last.frozen_retained, f_drop=f_pk.frozen_retained - last.frozen_retained,
-                s_peak=s_pk.stitched_retained, s_peak_step=s_pk.step,
-                s_end=last.stitched_retained, s_drop=s_pk.stitched_retained - last.stitched_retained,
-                xs_var=last.xs_var, xl_var=last.xl_var,
-            ))
 
         ax[0].axhline(1.0, ls=(0, (4, 3)), c='#999999', lw=0.8, zorder=0)
         ax[0].set_ylabel('retained (%)')
@@ -248,16 +387,18 @@ def plot_functional_transfer_traj(paths, title=None, figsize=(13.5, 4), markers=
         fig.tight_layout(w_pad=2.0)
         plt.show()
 
-    table = summary_table(rows, FUNCTIONAL_SPEC, caption=title or 'Functional transfer')
+    rows = seed_rows(by_seed, functional_row, FUNCTIONAL_SPEC)
+    table = summary_table(rows, FUNCTIONAL_SPEC, caption=_caption(title or 'Functional transfer', seeds))
     if show_table:
         _show(table)
     return pd.DataFrame(rows).set_index('name')
 
 
 def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=True,
-                                   show_table=True):
-    """paths: {label: path_to_trajectory_csv}. Returns the summary DataFrame."""
-    rows = []
+                                   show_table=True, recompute=None, force_recompute=False):
+    """paths: {label: path_to_trajectory_csv}. See plot_functional_transfer_traj for
+    seeds / recompute. Returns the summary DataFrame."""
+    seeds, by_seed = _prepare(paths, recompute, force_recompute)
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 2, figsize=figsize)
         ax = ax.ravel()
@@ -273,21 +414,7 @@ def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=Tr
 
             if d.retained.isna().all():
                 print(f"Skipping peaks for {name}: retained is all NaN")
-                rows.append(_empty_row(name, GEOMETRIC_SPEC))
                 continue
-
-            pk = d.loc[d.retained.idxmax()]
-            end = d.retained.iloc[-1]
-            rows.append(dict(
-                name=name,
-                gap_nats=pk.gap_nats,
-                r_peak=pk.retained, r_peak_step=pk.step,
-                r_end=end, r_drop=pk.retained - end,
-                frozen=pk.frozen_retained, stitched=pk.stitched_retained,
-                sim=pk.sim_above_shuffle, centered=pk.centered_sim,
-                sim_end=d.sim_above_shuffle.iloc[-1], centered_end=d.centered_sim.iloc[-1],
-                xs_scale=pk.xs_scale, xl_scale=pk.xl_scale,
-            ))
 
         ax[0].axhline(1.0, ls=(0, (4, 3)), c='#999999', lw=0.8, zorder=0)
         ax[0].set_ylabel('sim above shuffle')
@@ -306,18 +433,21 @@ def plot_geometric_similarity_traj(paths, title=None, figsize=(8, 4), markers=Tr
         fig.tight_layout(w_pad=2.0)
         plt.show()
 
-    table = summary_table(rows, GEOMETRIC_SPEC, caption=title or 'Geometric similarity')
+    rows = seed_rows(by_seed, geometric_row, GEOMETRIC_SPEC)
+    table = summary_table(rows, GEOMETRIC_SPEC, caption=_caption(title or 'Geometric similarity', seeds))
     if show_table:
         _show(table)
     return pd.DataFrame(rows).set_index('name')
 
 
-def plot_bidirectional(paths, title=None, figsize=(9, 4), show_table=True):
+def plot_bidirectional(paths, title=None, figsize=(9, 4), show_table=True,
+                       recompute=None, force_recompute=False):
     """Diagnose the bidirectional arm across alpha.
 
-    paths: {label: trajectory.csv} — one entry per alpha. Returns the summary DataFrame.
+    paths: {label: trajectory.csv} — one entry per alpha. See plot_functional_transfer_traj
+    for seeds / recompute. Returns the summary DataFrame.
     """
-    rows = []
+    seeds, by_seed = _prepare(paths, recompute, force_recompute)
     with mpl.rc_context(PAPER_STYLE):
         fig, ax = plt.subplots(1, 2, figsize=figsize)
         ax = ax.ravel()
@@ -337,9 +467,6 @@ def plot_bidirectional(paths, title=None, figsize=(9, 4), show_table=True):
             ax[1].annotate(name.split()[-1], (x_end, r_end * 100),
                            textcoords='offset points', xytext=(7, -3), fontsize=8, color=c)
 
-            xs_var = d.xs_var.iloc[-1] if 'xs_var' in d else float('nan')
-            rows.append(dict(name=name, xl_cycle_fvu=x_end, xs2xl_fvu=xs2xl_fvu.iloc[-1],
-                             xl_var=xl_var.iloc[-1], xs_var=xs_var, retained=r_end))
 
         ax[0].set_ylabel('FVU')
         ax[0].set_xlabel('align-head fit step')
@@ -357,7 +484,8 @@ def plot_bidirectional(paths, title=None, figsize=(9, 4), show_table=True):
         fig.tight_layout(w_pad=2.0)
         plt.show()
 
-    table = summary_table(rows, BIDIRECTIONAL_SPEC, caption=title or 'Bidirectional arm')
+    rows = seed_rows(by_seed, bidirectional_row, BIDIRECTIONAL_SPEC)
+    table = summary_table(rows, BIDIRECTIONAL_SPEC, caption=_caption(title or 'Bidirectional arm', seeds))
     if show_table:
         _show(table)
     return pd.DataFrame(rows).set_index('name')
