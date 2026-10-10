@@ -120,9 +120,15 @@ def recompute_trajectory_metrics(traj_seed, traj_config, model_bank_dir,
     xl_chk = xl_probe_ckpt['best_loss']
 
     # Test variance and RMS
-    for name, m in [('XS', xs_model), ('XL', xl_model)]:
-        v = torch.cat([m.forward_repr_at_site(site, x).reshape(-1, m.n_embed) for x, _ in eval_batches])
-        print(name, 'rms', v.pow(2).mean().sqrt().item(), 'var', v.var(0, unbiased=False).mean().item())
+    xs_v = torch.cat([xs_model.forward_repr_at_site(site, x).reshape(-1, xs_model.n_embed) for x, _ in eval_batches])
+    xs_model_rms = xs_v.pow(2).mean().sqrt().item(); xs_model_var = xs_v.var(0, unbiased=False).mean().item()
+                                     
+    xl_v = torch.cat([xl_model.forward_repr_at_site(site, x).reshape(-1, xl_model.n_embed) for x, _ in eval_batches])
+    xl_model_rms = xl_v.pow(2).mean().sqrt().item(); xl_model_var = xl_v.var(0, unbiased=False).mean().item()                                 
+                                     
+    # for name, m in [('XS', xs_model), ('XL', xl_model)]:
+    #     v = torch.cat([m.forward_repr_at_site(site, x).reshape(-1, m.n_embed) for x, _ in eval_batches])
+    #     print(name, 'rms', v.pow(2).mean().sqrt().item(), 'var', v.var(0, unbiased=False).mean().item())
 
     # Sanity: the cached probes must match THIS scaling convention.
     # (Training evals were monotone, so best_loss == loss of the saved weights.)
@@ -171,6 +177,10 @@ def recompute_trajectory_metrics(traj_seed, traj_config, model_bank_dir,
       rows.append({'step': traj_snap['step'], **align_geom,
                    'xl_probe_loss': xl_probe_loss,
                    'xs_probe_loss': xs_probe_loss,
+                   'xl_model_var': xl_model_var,
+                   'xl_model_rms' : xl_model_rms,
+                   'xs_model_var': xs_model_var,
+                   'xs_model_rms' : xs_model_rms,
                    'gap_nats': gap,
                    'xl2xs_probe_loss': xl2xs_probe_loss,
                    'retained': (xs_probe_loss - xl2xs_probe_loss) / gap,
